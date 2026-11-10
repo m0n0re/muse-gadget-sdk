@@ -56,3 +56,6 @@ CONFIG_BSP_LCD_DRAW_BUF_DOUBLE=y
 
 # Japanese captions: draw CJK glyphs (kana/kanji) instead of boxes.
 CONFIG_MUSE_CJK_FONT=y
+
+# Live voice calls with Muse (experimental): reply speech plays on the speaker.
+CONFIG_MUSE_REALTIME_VOICE=y
