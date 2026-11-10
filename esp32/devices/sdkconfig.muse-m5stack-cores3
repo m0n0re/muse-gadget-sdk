@@ -59,3 +59,4 @@ CONFIG_MUSE_CJK_FONT=y
 
 # Live voice calls with Muse (experimental): reply speech plays on the speaker.
 CONFIG_MUSE_REALTIME_VOICE=y
+CONFIG_MUSE_TTS_ENDPOINT="http://192.168.24.52:50022/say"

@@ -57,6 +57,7 @@
 #include "esp_attr.h"
 #include "esp_crt_bundle.h"
 #include "esp_heap_caps.h"
+#include "esp_http_client.h"
 #include "esp_log.h"
 #include "esp_random.h"
 #include "esp_timer.h"
@@ -124,6 +125,11 @@ static_assert(MP3_BUF > MP3_POLL_ROOM + MP3_HOLD, "reads would stall with the MP
 #define TEXT_MAX CAPTION_TEXT
 #endif
 /* The part of a message's kept text the automatic captions pace and show. */
+#ifndef CONFIG_MUSE_TTS_ENDPOINT
+#define CONFIG_MUSE_TTS_ENDPOINT ""
+#endif
+#define TTS_HTTP_TOTAL_US (20 * 1000000LL)   /* the TTS request's network time, all told */
+#define TTS_READ_CHUNK 2048
 #define CAPTION_LEN(text) strnlen((text), CAPTION_TEXT - 1)
 #define SPEECH_CHARS_PER_S 14              /* until the speech's length is known */
 #define TEXT_CHARS_PER_S 16                /* speaker off: reading pace, a little over speech */
@@ -1839,6 +1845,83 @@ static void on_chat_ack(stream_t *s)
 
 /* ---- Turn: speech ---- */
 
+static void decode(void);
+static void tts_data(const uint8_t *data, size_t len);
+
+/*
+ * POSTs the text to the TTS endpoint and feeds the MP3 it returns to tts_data(),
+ * on this task. Returns false if it failed before any audio arrived (the caller
+ * falls back to silence). Once audio has started it returns true, with
+ * mp3_ended set whether or not the stream finished. Time spent waiting for the
+ * MP3 buffer to drain (playback pace) doesn't count against the 20 s.
+ */
+static bool tts_fetch(const char *text)
+{
+    static uint8_t chunk[TTS_READ_CHUNK];
+    cJSON *obj = cJSON_CreateObject();
+    if (!obj) {
+        return false;
+    }
+    cJSON_AddStringToObject(obj, "text", text);
+    char *body = cJSON_PrintUnformatted(obj);
+    cJSON_Delete(obj);
+    if (!body) {
+        return false;
+    }
+    esp_http_client_config_t cfg = {};
+    cfg.url = CONFIG_MUSE_TTS_ENDPOINT;
+    cfg.method = HTTP_METHOD_POST;
+    cfg.timeout_ms = 5000;
+    esp_http_client_handle_t c = esp_http_client_init(&cfg);
+    if (!c) {
+        free(body);
+        return false;
+    }
+    int64_t deadline = now_us() + TTS_HTTP_TOTAL_US;
+    bool audio = false;
+    bool complete = false;
+    size_t blen = strlen(body);
+    esp_http_client_set_header(c, "Content-Type", "application/json");
+    if (esp_http_client_open(c, (int)blen) == ESP_OK &&
+        esp_http_client_write(c, body, (int)blen) == (int)blen &&
+        esp_http_client_fetch_headers(c) >= 0 && esp_http_client_get_status_code(c) == 200) {
+        while (now_us() < deadline) {
+            size_t room = MP3_BUF - s_turn.mp3_len;
+            if (room < TTS_READ_CHUNK) {
+                /* Full: let decode() drain it toward the speaker, don't drop bytes. */
+                int64_t t0 = now_us();
+                decode();
+                vTaskDelay(pdMS_TO_TICKS(20));
+                deadline += now_us() - t0;
+                continue;
+            }
+            int n = esp_http_client_read(c, (char *)chunk, TTS_READ_CHUNK);
+            if (n > 0) {
+                tts_data(chunk, (size_t)n);
+                audio = true;
+            } else if (n == -ESP_ERR_HTTP_EAGAIN) {
+                continue;
+            } else if (n == 0 && esp_http_client_is_complete_data_received(c)) {
+                complete = true;
+                break;
+            } else {
+                break;   /* closed early or failed */
+            }
+        }
+    }
+    esp_http_client_cleanup(c);
+    free(body);
+    if (!audio) {
+        ESP_LOGW(TAG, "TTS request failed before audio, showing text instead");
+        return false;
+    }
+    if (!complete) {
+        ESP_LOGW(TAG, "TTS stream ended early");
+    }
+    s_turn.mp3_ended = true;
+    return true;
+}
+
 static void start_tts(void)
 {
     if (s_turn.tts_msg >= 0) {
@@ -1849,32 +1932,40 @@ static void start_tts(void)
         if (m.tts != TTS_QUEUED) {
             continue;
         }
-        /*
-         * Replies are text, shown at reading pace: silence in place of speech
-         * paces the captions and ends the turn. To speak them instead, send
-         * the message's text (s_turn.texts + i * TEXT_MAX, if texts was
-         * allocated; up to TEXT_MAX - 1 bytes) to a TTS API of your choice and
-         * play the MP3 it returns. In place of the silence below: keep
-         * m.tts = TTS_ACTIVE and s_turn.tts_msg = i, set s_turn.silent = false,
-         * m.pcm_start = s_turn.pcm_out, m.pcm_frames = 0, s_turn.mp3_len = 0,
-         * s_turn.mp3_ended = false, s_turn.kbps = 0, s_turn.down_rate = 0 and
-         * mp3dec_init(&s_turn.dec). Then, on this task, pass the MP3 to
-         * tts_data() as it arrives (it buffers up to MP3_BUF and drops the
-         * rest, so hold off while it's full) and set s_turn.mp3_ended at the
-         * end. decode() plays it at the speaker's volume, captions following,
-         * and finishes the message once it's drained.
-         */
-        m.pcm_start = s_turn.pcm_out;
+        const char *text = s_turn.texts ? s_turn.texts + i * TEXT_MAX : nullptr;
         /* Paced to the text kept: a reply longer than CAPTION_TEXT shows what
          * was kept at reading pace, not stretched over the whole reply's time
          * (the Watcher keeps the rest for review). */
-        size_t shown = s_turn.texts ? CAPTION_LEN(s_turn.texts + i * TEXT_MAX) : m.len;
-        m.pcm_frames = (uint32_t)(shown * MIC_RATE / TEXT_CHARS_PER_S);
+        size_t shown = text ? CAPTION_LEN(text) : m.len;
+        m.pcm_start = s_turn.pcm_out;
         m.tts = TTS_ACTIVE;
         s_turn.tts_msg = i;
+        if (CONFIG_MUSE_TTS_ENDPOINT[0] && text && text[0]) {
+            /* Speak it: decode() plays the MP3 and finishes the message. */
+            s_turn.silent = false;
+            m.pcm_frames = 0;
+            s_turn.mp3_len = 0;
+            s_turn.mp3_ended = false;
+            s_turn.kbps = 0;
+            s_turn.down_rate = 0;
+            mp3dec_init(&s_turn.dec);
+            ESP_LOGI(TAG, "speaking message %s (%u chars)", m.id, (unsigned)m.len);
+            show_reply_start(m);
+            if (tts_fetch(text)) {
+                return;
+            }
+            /* Nothing played: fall back to silence below. */
+            s_turn.mp3_len = 0;
+            s_turn.mp3_ended = false;
+            s_turn.kbps = 0;
+            s_turn.down_rate = 0;
+        } else {
+            ESP_LOGI(TAG, "showing message %s (%u chars)", m.id, (unsigned)m.len);
+            show_reply_start(m);
+        }
+        /* Replies shown at reading pace: silence paces the captions and ends the turn. */
+        m.pcm_frames = (uint32_t)(shown * MIC_RATE / TEXT_CHARS_PER_S);
         s_turn.silent = true;
-        ESP_LOGI(TAG, "showing message %s (%u chars)", m.id, (unsigned)m.len);
-        show_reply_start(m);
         return;
     }
 }
