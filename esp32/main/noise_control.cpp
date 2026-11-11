@@ -1544,6 +1544,22 @@ static char *build_register_json(void) {
                 nullptr, volume_optional);
 #endif
 
+#if CONFIG_MUSE_HATCH
+    // Local extension of this fork (not in upstream Muse): say text through the
+    // TTS endpoint (CONFIG_MUSE_TTS_ENDPOINT) without a chat turn.
+    cJSON *speak_required = cJSON_CreateObject();
+    cJSON_AddItemToObject(speak_required, "text",
+                          string_param("What to say, UTF-8, at most 400 characters."));
+    add_command(commands, "voice.speak",
+                "Say the given text aloud on the speaker (text to speech), "
+                "showing it as a caption. Replies when the speech has "
+                "finished playing. Fails with \"busy\" if a conversation "
+                "turn, call or another utterance is active; retry later.",
+                speak_required, nullptr);
+    cJSON_AddNumberToObject(
+        cJSON_GetObjectItem(commands, "voice.speak"), "timeout_ms", 40000);
+#endif
+
 #if CONFIG_HOMEHUB_SENSECAP_SENSORS
     add_command(commands, "sensors.read",
                 "Read the air sensors: CO2 in ppm, the tVOC index (1-500, 100 "

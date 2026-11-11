@@ -75,6 +75,7 @@ extern "C" {
 #include "muse_account_api.h"
 #include "muse_link.h"
 #include "muse_settings.h"
+#include "muse_state.h"
 #include "muse_wifi.h"
 }
 #include "muse_chat_priv.h"
@@ -284,6 +285,7 @@ struct turn_t {
     int down_rate;
     bool detached;           /* the reply is slow: a notice is said, the turn ends, the reply starts another */
     bool incoming;           /* plays a reply to a request that outlived its turn */
+    bool speak;              /* a muse_hatch_speak() utterance: its text, no chat, no outside messages */
 };
 
 /*
@@ -310,6 +312,36 @@ EXT_RAM_BSS_ATTR static turn_t s_turn;
 EXT_RAM_BSS_ATTR static pending_t s_pending;
 static std::atomic<bool> s_incoming{false};   /* a reply is held: muse_hatch_incoming() */
 static std::atomic<bool> s_incoming_used{false};   /* a voice task plays them (the Voice PE's doesn't) */
+
+/*
+ * Local extension of this fork: muse_hatch_speak() says a given text through
+ * the TTS endpoint without a chat turn. It rides the incoming-reply path: the
+ * voice task, once idle, asks muse_hatch_incoming(), is told yes, and plays
+ * the turn that speak_play() sets up (hatch_reply: audio and captions). One
+ * request at a time; s_speak_state says where it is.
+ */
+#define SPEAK_MAX_CHARS 400
+#define SPEAK_TEXT_BYTES (SPEAK_MAX_CHARS * 4 + 1)
+#define SPEAK_CAP_US (30 * 1000000LL)      /* from the request to its reply, all told */
+#define SPEAK_DRAIN_US (1500000LL)         /* how long the speaker may take to empty the reply buffer */
+enum speak_state_t : int {
+    SPEAK_IDLE,
+    SPEAK_SETUP,      /* the caller is filling s_speak in */
+    SPEAK_PENDING,    /* waiting for the voice task to be idle and ask */
+    SPEAK_OFFERED,    /* muse_hatch_incoming() said yes; CMD_INCOMING is on its way */
+    SPEAK_PLAYING,    /* the turn runs */
+    SPEAK_DRAINING,   /* the turn ended well; the speaker is emptying the reply buffer */
+};
+static std::atomic<int> s_speak_state{SPEAK_IDLE};
+EXT_RAM_BSS_ATTR static struct {
+    char text[SPEAK_TEXT_BYTES];
+    muse_hatch_speak_cb cb;
+    void *ctx;
+    int64_t deadline_us, drain_us;
+    uint32_t gen;
+    bool ok, tts_failed;
+    char err[48];
+} s_speak;
 
 /* Turn milestones, logged together when the turn ends. */
 enum mark_t : uint8_t { M_RELEASE, M_SENT, M_ACK, M_TEXT, M_DONE, M_TTS, M_MP3, M_AUDIO, M_COUNT };
@@ -1026,8 +1058,11 @@ static void turn_reset_streams(void)
     }
 }
 
+static void speak_turn_ended(void);
+
 static void turn_finish(void)
 {
+    speak_turn_ended();
     turn_reset_streams();
     s_turn.phase = P_IDLE;
     s_turn.dict_id = s_turn.chat_id = 0;
@@ -1039,6 +1074,9 @@ static void turn_finish(void)
 static void turn_fail(const char *why)
 {
     ESP_LOGW(TAG, "turn failed: %s", why);
+    if (s_speak_state.load() == SPEAK_PLAYING) {
+        strlcpy(s_speak.err, why[0] ? why : "turn failed", sizeof(s_speak.err));
+    }
     if (s_turn.text) {
         muse_hatch_console("error", why, nullptr);
     }
@@ -1049,6 +1087,9 @@ static void turn_fail(const char *why)
 /* Ends the turn once its reply is in; `complete` is false when it was cut off. */
 static void turn_done(bool complete)
 {
+    if (s_turn.speak) {
+        s_speak.ok = complete;
+    }
     if (s_turn.text) {
         muse_hatch_console("done", nullptr, "\"messages\":%d,\"complete\":%s", s_turn.nmsgs,
                            complete ? "true" : "false");
@@ -1398,7 +1439,7 @@ static int bind_msg(const char *id, cJSON *payload)
         return -1;
     }
     int i = find_msg(id);
-    if (i >= 0 || s_turn.phase != P_WAIT_REPLY) {
+    if (i >= 0 || s_turn.phase != P_WAIT_REPLY || s_turn.speak) {
         return i;
     }
     if (s_turn.incoming && pending_played(id)) {
@@ -1886,6 +1927,9 @@ static bool tts_fetch(const char *text)
         esp_http_client_write(c, body, (int)blen) == (int)blen &&
         esp_http_client_fetch_headers(c) >= 0 && esp_http_client_get_status_code(c) == 200) {
         while (now_us() < deadline) {
+            if (s_turn.speak && now_us() > s_speak.deadline_us) {
+                break;   /* the speak command's own cap */
+            }
             size_t room = MP3_BUF - s_turn.mp3_len;
             if (room < TTS_READ_CHUNK) {
                 /* Full: let decode() drain it toward the speaker, don't drop bytes. */
@@ -1932,11 +1976,13 @@ static void start_tts(void)
         if (m.tts != TTS_QUEUED) {
             continue;
         }
-        const char *text = s_turn.texts ? s_turn.texts + i * TEXT_MAX : nullptr;
+        /* A speak request says its whole text; captions keep what fits. */
+        const char *text = s_turn.speak ? s_speak.text : s_turn.texts ? s_turn.texts + i * TEXT_MAX : nullptr;
+        const char *caption = s_turn.texts ? s_turn.texts + i * TEXT_MAX : nullptr;
         /* Paced to the text kept: a reply longer than CAPTION_TEXT shows what
          * was kept at reading pace, not stretched over the whole reply's time
          * (the Watcher keeps the rest for review). */
-        size_t shown = text ? CAPTION_LEN(text) : m.len;
+        size_t shown = caption ? CAPTION_LEN(caption) : m.len;
         m.pcm_start = s_turn.pcm_out;
         m.tts = TTS_ACTIVE;
         s_turn.tts_msg = i;
@@ -1955,6 +2001,9 @@ static void start_tts(void)
                 return;
             }
             /* Nothing played: fall back to silence below. */
+            if (s_turn.speak) {
+                s_speak.tts_failed = true;
+            }
             s_turn.mp3_len = 0;
             s_turn.mp3_ended = false;
             s_turn.kbps = 0;
@@ -2077,6 +2126,89 @@ static void decode(void)
         m.pcm_frames = s_turn.pcm_out - m.pcm_start;
         m.tts = TTS_FINISHED;
         s_turn.tts_msg = -1;
+    }
+}
+
+/* ---- Speak requests (muse_hatch_speak) ---- */
+
+/* Ends the request: tells the caller, then frees the slot. */
+static void speak_complete(bool ok, const char *code, const char *message)
+{
+    muse_hatch_speak_cb cb = s_speak.cb;
+    void *ctx = s_speak.ctx;
+    if (ok) {
+        ESP_LOGI(TAG, "speak done");
+    } else {
+        ESP_LOGW(TAG, "speak failed: %s", code);
+    }
+    if (cb) {
+        cb(ctx, ok, code, message);
+    }
+    s_speak_state = SPEAK_IDLE;
+}
+
+/* turn_finish() of the speak turn: how it went. Failures are told now; success once the speaker has the audio. */
+static void speak_turn_ended(void)
+{
+    if (s_speak_state.load() != SPEAK_PLAYING) {
+        return;
+    }
+    if (s_speak.ok && !s_speak.tts_failed) {
+        s_speak.drain_us = now_us();
+        s_speak_state = SPEAK_DRAINING;
+    } else if (s_speak.tts_failed) {
+        speak_complete(false, "tts_failed", "tts request failed");
+    } else if (!strcmp(s_speak.err, "SPEAK TIMEOUT")) {
+        speak_complete(false, "timeout", "speak timed out");
+    } else if (s_speak.err[0]) {
+        speak_complete(false, "unavailable", s_speak.err);
+    } else {
+        speak_complete(false, "interrupted", "speech was interrupted");
+    }
+}
+
+/* The voice task is idle and has asked: play the request as a turn of its own. */
+static void speak_play(uint32_t gen)
+{
+    s_speak.gen = gen;
+    s_speak.ok = s_speak.tts_failed = false;
+    s_speak.err[0] = '\0';
+    s_speak_state = SPEAK_PLAYING;
+    if (!turn_start(gen, false)) {
+        return;   /* turn_fail() ended the request */
+    }
+    s_turn.speak = true;
+    s_turn.phase = P_WAIT_REPLY;
+    s_turn.chat_posted = s_turn.acked = true;
+    /* Nothing more is coming: no settling time. */
+    s_turn.chat_us = s_turn.last_event_us = s_turn.last_content_us = now_us() - SETTLE_US;
+    int i = s_turn.nmsgs++;
+    s_turn.msgs[i] = msg_t{};
+    strlcpy(s_turn.msgs[i].id, "local-speak", sizeof(s_turn.msgs[i].id));
+    add_reply_text(i, s_speak.text);
+    message_done(i, nullptr);
+}
+
+/* Every pass of the session task: the request's 30 s cap, and the reply buffer emptying. */
+static void speak_poll(void)
+{
+    int st = s_speak_state.load();
+    if (st == SPEAK_IDLE || st == SPEAK_SETUP) {
+        return;
+    }
+    int64_t t = now_us();
+    if (st == SPEAK_DRAINING) {
+        if (s_gen.load() != s_speak.gen) {
+            speak_complete(false, "interrupted", "speech was interrupted");
+        } else if (xStreamBufferIsEmpty(s_out) || t - s_speak.drain_us > SPEAK_DRAIN_US) {
+            speak_complete(true, nullptr, nullptr);
+        }
+    } else if (t > s_speak.deadline_us) {
+        if (st == SPEAK_PLAYING && s_turn.phase != P_IDLE) {
+            turn_fail("SPEAK TIMEOUT");   /* ends the request through turn_finish() */
+        } else if (st == SPEAK_PENDING || st == SPEAK_OFFERED) {
+            speak_complete(false, "timeout", "the device did not get to it in time");
+        }
     }
 }
 
@@ -2430,8 +2562,12 @@ static void handle(const cmd_t &cmd)
         break;
     case CMD_WAKE:   /* only ends hatch_task's resting wait */
         break;
-    case CMD_INCOMING:
+    case CMD_INCOMING: {
+        bool speak = s_speak_state.load() == SPEAK_OFFERED;
         if (cmd.gen != s_gen.load()) {
+            if (speak) {
+                speak_complete(false, "busy", "the device is in use");
+            }
             break;   /* a press came first: the rows stay held, offered again once idle */
         }
         if (s_turn.phase != P_IDLE) {
@@ -2440,10 +2576,18 @@ static void handle(const cmd_t &cmd)
             ev.type = MUSE_HATCH_EV_ERROR;
             ev.gen = cmd.gen;
             xQueueSend(s_events, &ev, pdMS_TO_TICKS(200));
+            if (speak) {
+                speak_complete(false, "busy", "the device is in use");
+            }
             break;
         }
-        incoming_play(cmd.gen);
+        if (speak) {
+            speak_play(cmd.gen);
+        } else {
+            incoming_play(cmd.gen);
+        }
         break;
+    }
     }
 }
 
@@ -2460,6 +2604,9 @@ static void hatch_task(void *arg)
                       : !s_connected ? (s_resting ? -1 : 200)
                       : s_turn.phase != P_IDLE ? 2
                       : s_resting ? 500 : 20;
+        if (s_speak_state.load() != SPEAK_IDLE && (wait_ms < 0 || wait_ms > 100)) {
+            wait_ms = 100;   /* watch the speak request's cap */
+        }
         TickType_t wait = wait_ms < 0 ? portMAX_DELAY : pdMS_TO_TICKS(wait_ms);
         if (xQueueReceive(s_cmds, &cmd, wait) == pdTRUE) {
             handle(cmd);
@@ -2474,6 +2621,7 @@ static void hatch_task(void *arg)
         }
 #endif
         pending_expire(now_us());   /* connected or not */
+        speak_poll();
         if (!s_connected) {
             if (!muse_wifi_connected()) {
                 s_auto_next_us = 0;
@@ -2717,10 +2865,53 @@ extern "C" void muse_hatch_text_cancel(void)
     post(CMD_TEXT_CANCEL, 0);
 }
 
+extern "C" bool muse_hatch_speak(const char *text, muse_hatch_speak_cb cb, void *ctx, const char **code,
+                                 const char **message)
+{
+    auto reject = [&](const char *c, const char *m) {
+        *code = c;
+        *message = m;
+        return false;
+    };
+    if (!CONFIG_MUSE_TTS_ENDPOINT[0]) {
+        return reject("tts_not_configured", "tts not configured");
+    }
+    size_t chars = 0;
+    for (const char *p = text ? text : ""; *p; p++) {
+        chars += ((unsigned char)*p & 0xc0) != 0x80;
+    }
+    if (!chars) {
+        return reject("invalid_params", "text is empty");
+    }
+    if (chars > SPEAK_MAX_CHARS) {
+        return reject("invalid_params", "text is too long (at most 400 characters)");
+    }
+    if (!s_cmds || !muse_hatch_configured() || !muse_wifi_connected()) {
+        return reject("unavailable", "not connected to Muse");
+    }
+    if (s_turn.phase != P_IDLE || call_busy()) {
+        return reject("busy", "a turn or call is in progress");
+    }
+    int idle = SPEAK_IDLE;
+    if (!s_speak_state.compare_exchange_strong(idle, SPEAK_SETUP)) {
+        return reject("busy", "another speak is in progress");
+    }
+    strlcpy(s_speak.text, text, sizeof(s_speak.text));
+    s_speak.cb = cb;
+    s_speak.ctx = ctx;
+    s_speak.deadline_us = now_us() + SPEAK_CAP_US;
+    s_speak_state = SPEAK_PENDING;
+    muse_state_set_asleep(false);   /* the voice task rests asleep on battery: wake it to ask */
+    post(CMD_WAKE, 0);
+    return true;
+}
+
 extern "C" bool muse_hatch_incoming(void)
 {
     s_incoming_used = true;
-    if (!s_incoming.exchange(false)) {
+    int pending = SPEAK_PENDING;
+    bool speak = s_speak_state.compare_exchange_strong(pending, SPEAK_OFFERED);
+    if (!s_incoming.exchange(false) && !speak) {
         return false;
     }
     /* A turn of its own, numbered here like a press's, so a press that follows replaces it. */

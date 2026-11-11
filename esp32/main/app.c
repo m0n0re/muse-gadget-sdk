@@ -94,6 +94,9 @@
 #if CONFIG_MUSE_ENABLED
 #include "muse_glue.h"
 #include "muse_input.h"
+#if CONFIG_MUSE_HATCH
+#include "muse_chat.h"
+#endif
 // Muse joins Wi-Fi from its own settings, before or without pairing.
 #define WIFI_WITHOUT_PAIRING 1
 #else
@@ -1684,6 +1687,28 @@ static void watcher_camera_capture_task(void *arg) {
 }
 #endif
 
+#if CONFIG_MUSE_HATCH
+// voice.speak: a local extension of this fork. Replies when the speech has
+// finished playing, or with the error that stopped it.
+typedef struct {
+    noise_ctrl_session_generation_t session_generation;
+    char request_id[64];
+} speak_ctx_t;
+
+static void speak_done(void *user, bool ok, const char *code, const char *message) {
+    speak_ctx_t *ctx = user;
+    cJSON *result = cJSON_CreateObject();
+    cJSON_AddBoolToObject(result, "ok", ok);
+    if (!ok) {
+        cJSON *error = cJSON_AddObjectToObject(result, "error");
+        cJSON_AddStringToObject(error, "code", code ? code : "speak_failed");
+        cJSON_AddStringToObject(error, "message", message ? message : "speak failed");
+    }
+    noise_ctrl_send_command_result(ctx->session_generation, ctx->request_id, result);
+    free(ctx);
+}
+#endif
+
 // ---- WebSocket command callbacks -------------------------------------------
 
 typedef enum {
@@ -2001,6 +2026,26 @@ static cJSON *on_ws_command(
                                 args, 4, NULL, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS) {
             free(args);
             return command_error("out_of_memory", "failed to start camera capture");
+        }
+        cJSON *async = cJSON_CreateObject();
+        cJSON_AddBoolToObject(async, "_async", true);
+        return async;
+    }
+#endif
+#if CONFIG_MUSE_HATCH
+    if (strcmp(command, "voice.speak") == 0) {
+        cJSON *text = cJSON_GetObjectItem(params, "text");
+        if (!cJSON_IsString(text) || !text->valuestring || !text->valuestring[0]) {
+            return command_error("missing_param", "text is required");
+        }
+        speak_ctx_t *ctx = calloc(1, sizeof(*ctx));
+        if (!ctx) return command_error("out_of_memory", "failed to allocate");
+        ctx->session_generation = session_generation;
+        strncpy(ctx->request_id, request_id, sizeof(ctx->request_id) - 1);
+        const char *code, *message;
+        if (!muse_hatch_speak(text->valuestring, speak_done, ctx, &code, &message)) {
+            free(ctx);
+            return command_error(code, message);
         }
         cJSON *async = cJSON_CreateObject();
         cJSON_AddBoolToObject(async, "_async", true);

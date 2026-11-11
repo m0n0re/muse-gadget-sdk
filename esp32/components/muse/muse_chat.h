@@ -130,6 +130,20 @@ void muse_chat_set_caption_px(int width_px, int (*glyph_px)(uint32_t letter, uin
 /* Reply speech as 16 kHz mono. Waits up to wait_ms for some; returns frames read. */
 size_t muse_hatch_turn_read(int16_t *pcm, size_t frames, int wait_ms);
 
+/*
+ * Local extension of this fork: says `text` (UTF-8, 1 to 400 characters) through
+ * CONFIG_MUSE_TTS_ENDPOINT on the speaker, with the text as the caption, without
+ * a chat turn (CONFIG_MUSE_HATCH only). Returns false at once, with *code and
+ * *message set, if it can't be taken: "tts_not_configured", "invalid_params",
+ * "unavailable" (no Muse connection), "busy" (a turn, call or another speak is
+ * active). Otherwise `cb` runs exactly once, on the session task, within about
+ * 30 s: when the speech has finished playing (ok), or when it failed ("busy",
+ * "tts_failed", "timeout", "interrupted", "unavailable"; code and message are
+ * NULL on success). The device wakes if asleep. A press interrupts it.
+ */
+typedef void (*muse_hatch_speak_cb)(void *ctx, bool ok, const char *code, const char *message);
+bool muse_hatch_speak(const char *text, muse_hatch_speak_cb cb, void *ctx, const char **code, const char **message);
+
 /* Bench test: decodes a built-in MP3 to 16 kHz; caller frees *pcm. Returns frames. */
 size_t muse_hatch_mp3_selftest(int16_t **pcm);
 
