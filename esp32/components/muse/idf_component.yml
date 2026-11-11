@@ -30,6 +30,16 @@ dependencies:
     version: "2.6.1"
     rules:
       - if: "$CONFIG{MUSE_WAKE_WORD_HI_MUSE} == True"
+  # esp-sr 2.6.1's prebuilt libwakenet bakes in esp-dl's class layouts, so
+  # esp-dl must match what it was built against. 3.3.12 lacks the
+  # SpeechFeatureBase vtable it links to (link error); 3.3.15 adds
+  # dl::Model::m_built, so the library allocates the old, smaller Model and
+  # the new constructor writes past it, corrupting the next heap block
+  # (TLSF "block must be free" at boot). 3.3.13 and 3.3.14 have both right.
+  espressif/esp-dl:
+    version: "3.3.14"
+    rules:
+      - if: "$CONFIG{MUSE_WAKE_WORD_HI_MUSE} == True"
   lvgl/lvgl:
     version: "9.5.0"
     public: true
