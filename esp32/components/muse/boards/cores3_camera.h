@@ -30,6 +30,13 @@ extern "C" {
  */
 const camera_driver_t *cores3_camera_driver(void);
 
+/*
+ * Diagnostic (camera.raw): one frame exactly as the sensor delivered it, no
+ * U/V swap and no JPEG, copied into a PSRAM buffer the caller free()s.
+ * *fourcc is the pixelformat esp_video reported.
+ */
+esp_err_t cores3_camera_capture_raw(uint8_t **data, size_t *len, int *width, int *height, uint32_t *fourcc);
+
 #ifdef __cplusplus
 }
 #endif

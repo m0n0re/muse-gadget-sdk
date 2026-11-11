@@ -144,6 +144,7 @@ typedef struct {
     void *map[CAM_BUFS];
     size_t map_len[CAM_BUFS];
     bool streaming;
+    uint32_t fourcc;   /* pixelformat G_FMT reported */
 } stream_t;
 
 static void stream_close(stream_t *s)
@@ -162,7 +163,7 @@ static void stream_close(stream_t *s)
     }
 }
 
-static esp_err_t stream_open(stream_t *s)
+static esp_err_t stream_open(stream_t *s, bool require_yuyv)
 {
     memset(s, 0, sizeof(*s));
     s->fd = open(BSP_CAMERA_DEVICE, O_RDONLY);
@@ -187,6 +188,7 @@ static esp_err_t stream_open(stream_t *s)
         /* esp_video's G_FMT leaves sizeimage at 0 (the buffer size lives in the stream's
          * buf info); the real frame size is the buffer length QUERYBUF reports below. */
         const uint32_t pf = fmt.fmt.pix.pixelformat;
+        s->fourcc = pf;
         ESP_LOGI(TAG, "format %ux%u, pixelformat '%c%c%c%c' (%s), expected %u bytes/frame (sizeimage field %u)",
                  (unsigned)fmt.fmt.pix.width, (unsigned)fmt.fmt.pix.height, (char)(pf & 0xff),
                  (char)((pf >> 8) & 0xff), (char)((pf >> 16) & 0xff), (char)((pf >> 24) & 0xff),
@@ -196,7 +198,7 @@ static esp_err_t stream_open(stream_t *s)
             ESP_LOGE(TAG, "sensor is not at %dx%d", CAM_W, CAM_H);
             return ESP_FAIL;
         }
-        if (pf != V4L2_PIX_FMT_YUYV) {
+        if (pf != V4L2_PIX_FMT_YUYV && require_yuyv) {
             ESP_LOGE(TAG, "pixel format is not YUYV; the JPEG encoder is set up for YUYV");
             return ESP_FAIL;
         }
@@ -308,7 +310,7 @@ static esp_err_t cam_capture(camera_frame_t *out)
     }
     uint8_t *jpg = NULL;
     stream_t s;
-    err = stream_open(&s);
+    err = stream_open(&s, true);
     if (err == ESP_OK) {
         log_heap("camera running");
         const uint8_t *yuv = NULL;
@@ -364,6 +366,47 @@ static esp_err_t cam_capture(camera_frame_t *out)
     ESP_LOGI(TAG, "captured %ux%u JPEG, %u bytes, %d ms", (unsigned)out->width, (unsigned)out->height,
              (unsigned)out->len, (int)((esp_timer_get_time() - t0) / 1000));
     return ESP_OK;
+}
+
+esp_err_t cores3_camera_capture_raw(uint8_t **data, size_t *len, int *width, int *height, uint32_t *fourcc)
+{
+    heap_mark_t before = heap_mark();
+    log_heap("raw capture start");
+    esp_err_t err = camera_up();
+    if (err != ESP_OK) {
+        return err;
+    }
+    uint8_t *copy = NULL;
+    stream_t s;
+    err = stream_open(&s, false);
+    if (err == ESP_OK) {
+        const uint8_t *frame = NULL;
+        size_t frame_len = 0;
+        err = stream_grab(&s, &frame, &frame_len);
+        if (err == ESP_OK) {
+            ESP_LOGI(TAG, "raw frame: %u bytes (expected %u), unconverted", (unsigned)frame_len,
+                     (unsigned)CAM_FRAME_BYTES);
+            copy = heap_caps_malloc(frame_len, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+            if (!copy) {
+                err = ESP_ERR_NO_MEM;
+            } else {
+                memcpy(copy, frame, frame_len);
+                *data = copy;
+                *len = frame_len;
+                *width = CAM_W;
+                *height = CAM_H;
+                *fourcc = s.fourcc;
+            }
+        }
+    }
+    stream_close(&s);
+    camera_down();
+    if (err != ESP_OK) {
+        free(copy);
+    }
+    log_heap("raw capture done, camera off");
+    log_heap_delta(&before);
+    return err;
 }
 
 static void cam_release(camera_frame_t *frame)

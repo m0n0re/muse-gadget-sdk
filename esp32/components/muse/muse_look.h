@@ -48,6 +48,15 @@ void muse_look_init(void);
 typedef void (*muse_look_cb)(void *ctx, bool ok, const char *code, const char *message, const char *file,
                              size_t bytes);
 bool muse_look_start(muse_look_cb cb, void *ctx, const char **code, const char **message);
+
+/*
+ * camera.raw, a diagnostic: the same as camera.look but the unconverted sensor
+ * frame is POSTed (application/octet-stream) to the endpoint's server at /raw.
+ * `fourcc` is the pixelformat the driver reported, as 4 characters.
+ */
+typedef void (*muse_raw_cb)(void *ctx, bool ok, const char *code, const char *message, const char *file,
+                            size_t bytes, int width, int height, const char *fourcc);
+bool muse_raw_start(muse_raw_cb cb, void *ctx, const char **code, const char **message);
 #else
 static inline void muse_look_init(void) {}
 #endif

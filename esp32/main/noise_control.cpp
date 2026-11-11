@@ -1618,6 +1618,13 @@ static char *build_register_json(void) {
                 nullptr, nullptr);
     cJSON_AddNumberToObject(
         cJSON_GetObjectItem(commands, "camera.look"), "timeout_ms", 20000);
+    add_command(commands, "camera.raw",
+                "Diagnostic: take one picture and upload the unconverted sensor frame "
+                "(YUV, 153600 bytes) to the camera endpoint server's /raw. Replies with "
+                "file, bytes, width, height and fourcc. Same busy rules as camera.look.",
+                nullptr, nullptr);
+    cJSON_AddNumberToObject(
+        cJSON_GetObjectItem(commands, "camera.raw"), "timeout_ms", 20000);
     // Local extension of this fork: the StackChan neck servos (muse_servo.c).
     {
         cJSON *move_required = cJSON_CreateObject();

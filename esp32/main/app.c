@@ -1750,6 +1750,31 @@ static void look_done(void *user, bool ok, const char *code, const char *message
     free(ctx);
 }
 
+// camera.raw: diagnostic; the unconverted sensor frame goes to the endpoint server's /raw.
+static void raw_done(void *user, bool ok, const char *code, const char *message, const char *file, size_t bytes,
+                     int width, int height, const char *fourcc) {
+    look_ctx_t *ctx = user;
+    cJSON *result = cJSON_CreateObject();
+    cJSON_AddBoolToObject(result, "ok", ok);
+    if (ok) {
+        cJSON *payload = cJSON_AddObjectToObject(result, "payload");
+        cJSON_AddStringToObject(payload, "file", file);
+        cJSON_AddNumberToObject(payload, "bytes", (double)bytes);
+        cJSON_AddNumberToObject(payload, "width", width);
+        cJSON_AddNumberToObject(payload, "height", height);
+        cJSON_AddStringToObject(payload, "fourcc", fourcc);
+    } else {
+        cJSON *error = cJSON_AddObjectToObject(result, "error");
+        cJSON_AddStringToObject(error, "code", code ? code : "raw_failed");
+        cJSON_AddStringToObject(error, "message", message ? message : "camera.raw failed");
+    }
+    ESP_LOGI(TAG, "camera.raw reply queued: ok=%d (free DMA %u, internal %u)", ok,
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_DMA),
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+    noise_ctrl_send_command_result(ctx->session_generation, ctx->request_id, result);
+    free(ctx);
+}
+
 // head.move / head.gesture / head.state: local extensions of this fork.
 typedef struct {
     noise_ctrl_session_generation_t session_generation;
@@ -2143,6 +2168,20 @@ static cJSON *on_ws_command(
         strncpy(ctx->request_id, request_id, sizeof(ctx->request_id) - 1);
         const char *code, *message;
         if (!muse_look_start(look_done, ctx, &code, &message)) {
+            free(ctx);
+            return command_error(code, message);
+        }
+        cJSON *async = cJSON_CreateObject();
+        cJSON_AddBoolToObject(async, "_async", true);
+        return async;
+    }
+    if (strcmp(command, "camera.raw") == 0) {
+        look_ctx_t *ctx = calloc(1, sizeof(*ctx));
+        if (!ctx) return command_error("out_of_memory", "failed to allocate");
+        ctx->session_generation = session_generation;
+        strncpy(ctx->request_id, request_id, sizeof(ctx->request_id) - 1);
+        const char *code, *message;
+        if (!muse_raw_start(raw_done, ctx, &code, &message)) {
             free(ctx);
             return command_error(code, message);
         }
