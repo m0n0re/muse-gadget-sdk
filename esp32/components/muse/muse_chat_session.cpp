@@ -877,6 +877,9 @@ static bool resolve_vm(char *err, size_t err_cap)
             ESP_LOGI(TAG, "VM %s (%s) via Link", s_vm.vm_id, s_vm.vm_name);
             return true;
         }
+        ESP_LOGW(TAG, "stage resolve_vm (Link credentials) failed; linked=%d free internal %u largest %u",
+                 (int)muse_link_hatch_linked(), (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
         strlcpy(err, muse_link_hatch_linked() ? "Can't reach Muse's server" : "Not paired", err_cap);
         return false;
     }
@@ -920,6 +923,9 @@ static bool connect_once(char *err, size_t err_cap, int *http_status)
     conn_t &c = s_conn;
     c.tls = esp_tls_init();
     if (!c.tls) {
+        ESP_LOGW(TAG, "stage esp_tls_init failed (free internal %u largest %u)",
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
         strlcpy(err, "Out of memory", err_cap);
         return false;
     }
@@ -927,7 +933,20 @@ static bool connect_once(char *err, size_t err_cap, int *http_status)
     cfg.crt_bundle_attach = esp_crt_bundle_attach;
     cfg.timeout_ms = 15000;
     int64_t t0 = now_us();
+    ESP_LOGI(TAG, "stage tls connect %s:%d (free internal %u largest %u)", s_host, NOISE_PORT,
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
     if (esp_tls_conn_new_sync(s_host, strlen(s_host), NOISE_PORT, &cfg, c.tls) != 1) {
+        int tls_code = 0, tls_flags = 0;
+        esp_tls_error_handle_t eh = nullptr;
+        esp_err_t e = esp_tls_get_error_handle(c.tls, &eh) == ESP_OK
+                          ? esp_tls_get_and_clear_last_error(eh, &tls_code, &tls_flags)
+                          : ESP_FAIL;
+        ESP_LOGW(TAG, "stage dns/socket/connect/tls %s:%d failed: esp_err=%s tls_code=-0x%x flags=0x%x errno=%d "
+                 "(free internal %u largest %u)",
+                 s_host, NOISE_PORT, esp_err_to_name(e), -tls_code, tls_flags, errno,
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
         snprintf(err, err_cap, "Can't reach %s", s_host);
         return false;
     }
@@ -953,15 +972,22 @@ static bool connect_once(char *err, size_t err_cap, int *http_status)
     c.svc = static_cast<uint8_t *>(psram_alloc(SCRATCH));
     c.env = static_cast<uint8_t *>(psram_alloc(SCRATCH));
     if (!c.session || !c.ws || !c.rx || !c.tf || !c.sr || !c.svc || !c.env) {
+        ESP_LOGW(TAG, "stage alloc failed: crypto=%d session=%d ws=%d rx=%d tf=%d sr=%d svc=%d env=%d",
+                 c.crypto != nullptr, c.session != nullptr, c.ws != nullptr, c.rx != nullptr, c.tf != nullptr,
+                 c.sr != nullptr, c.svc != nullptr, c.env != nullptr);
         strlcpy(err, "Out of memory", err_cap);
         return false;
     }
     if (!noise_handshake(&c)) {
+        ESP_LOGW(TAG, "stage noise handshake failed (free internal %u largest %u)",
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
         strlcpy(err, "Noise handshake failed", err_cap);
         return false;
     }
     int fd = -1;
     if (esp_tls_get_conn_sockfd(c.tls, &fd) != ESP_OK || fd < 0) {
+        ESP_LOGW(TAG, "stage get sockfd failed (fd %d)", fd);
         strlcpy(err, "Socket error", err_cap);
         return false;
     }
@@ -970,6 +996,7 @@ static bool connect_once(char *err, size_t err_cap, int *http_status)
     c.last_rx_us = c.last_ping_us = c.last_use_us = now_us();
     s_connected = true;
     if (!open_subscription()) {
+        ESP_LOGW(TAG, "stage subscribe open failed");
         strlcpy(err, "Subscribe failed", err_cap);
         return false;
     }

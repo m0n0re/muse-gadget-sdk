@@ -2495,10 +2495,20 @@ static const vm_info_t *find_vm_by_id(const vm_info_t *vms, int count, const cha
 // and (on token refresh) writes NVS.
 static void hatch_vm_task(void *arg) {
     hatch_vm_request_t *req = arg;
-    if (config_is_provisioned() && operation_gate_take(pdMS_TO_TICKS(15000), "Muse VM lookup")) {
+    if (!config_is_provisioned()) {
+        ESP_LOGW(TAG, "vm lookup: not provisioned");
+    } else if (!operation_gate_take(pdMS_TO_TICKS(15000), "Muse VM lookup")) {
+        ESP_LOGW(TAG, "vm lookup: operation gate busy for 15 s (free internal %u, largest %u)",
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+    } else {
         vm_info_t vms[VM_API_MAX_VMS];
         int count = fetch_vms_with_refresh_with_gate_held(vms, VM_API_MAX_VMS);
-        if (count > 0) {
+        if (count <= 0) {
+            ESP_LOGW(TAG, "vm lookup: VM list fetch failed (count %d; free internal %u, largest %u)", count,
+                     (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                     (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+        } else {
             const vm_info_t *target = NULL;
             if (req->want_vm && req->want_vm[0]) {
                 target = find_vm_by_id(vms, count, req->want_vm);
@@ -2514,6 +2524,9 @@ static void hatch_vm_task(void *arg) {
                 req->vm_token = strdup(token);
                 strlcpy(req->vm_name, target->vm_name ? target->vm_name : "", req->name_cap);
                 req->ok = req->vm_token != NULL;
+                if (!req->ok) ESP_LOGW(TAG, "vm lookup: token strdup failed");
+            } else {
+                ESP_LOGW(TAG, "vm lookup: no usable VM among %d", count);
             }
             vm_list_free(vms, count);
         }
@@ -2531,11 +2544,31 @@ bool app_hatch_vm_credentials(const char *want_vm, char *vm_id, size_t id_cap,
         .vm_name = vm_name, .name_cap = name_cap,
         .waiter = xTaskGetCurrentTaskHandle(),
     };
-    if (xTaskCreate(hatch_vm_task, "muse_vm", 8192, &req, 4, NULL) != pdPASS) {
+    // Internal stack first (the NVS write on a token refresh needs it). With
+    // the wake word resident, internal RAM is ~13 KB with a ~3 KB largest
+    // block, so the 8 KB stack can't be allocated; then the stack goes in
+    // PSRAM, which only matters if this lookup has to refresh the token.
+    const char *where = "internal";
+    BaseType_t ok = xTaskCreatePinnedToCoreWithCaps(hatch_vm_task, "muse_vm", 8192, &req, 4, NULL,
+                                                    tskNO_AFFINITY, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (ok != pdPASS) {
+        ESP_LOGW(TAG, "vm lookup: internal 8 KB stack failed (free internal %u, largest %u); trying PSRAM",
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+        ok = xTaskCreatePinnedToCoreWithCaps(hatch_vm_task, "muse_vm", 8192, &req, 4, NULL,
+                                             tskNO_AFFINITY, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        where = "PSRAM";
+    }
+    if (ok != pdPASS) {
+        ESP_LOGE(TAG, "vm lookup: task create failed (free internal %u, largest %u)",
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
         return false;
     }
+    ESP_LOGI(TAG, "vm lookup task started (stack in %s)", where);
     ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
     *vm_token = req.vm_token;
+    ESP_LOGI(TAG, "vm lookup %s", req.ok ? "ok" : "failed");
     return req.ok;
 }
 #endif  // CONFIG_MUSE_ENABLED || CONFIG_HOMEHUB_VOICE
