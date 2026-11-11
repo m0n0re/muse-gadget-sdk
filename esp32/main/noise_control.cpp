@@ -891,7 +891,7 @@ static void clear_pending_json_body(pending_json_body &body) {
     body = {};
 }
 
-// Minimum total free DMA heap to send link.register (see send_json_body_chunk).
+// Minimum total free DMA heap to send link.register / link.heartbeat (see send_json_body_chunk).
 static constexpr size_t REGISTER_MIN_DMA_BYTES = 6 * 1024;
 
 enum class json_send_status { Pending, Complete, Failed };
@@ -916,11 +916,14 @@ static json_send_status send_json_body_chunk(esp_tls_t *tls, ClientSession &sess
     // free DMA sits below the 16 KiB burst margin for good, so gating it on
     // that margin stalls registration forever (no log, no retry). It is a
     // single ~3 KB chunk, so for it keep only a small total floor plus the
-    // contiguous AES-descriptor floor. Everything else keeps the full margin.
+    // contiguous AES-descriptor floor. link.heartbeat gets the same relaxation:
+    // without it the server never sees liveness, drops the device and resets
+    // the tunnel. Everything else keeps the full margin.
     {
         size_t dma_free = 0;
         bool total_ok = noise_tx_has_dma_headroom(&dma_free);
-        if (!total_ok && body.is_registration
+        const bool small_session_msg = body.is_registration || body.is_heartbeat;
+        if (!total_ok && small_session_msg
             && dma_free >= REGISTER_MIN_DMA_BYTES) {
             total_ok = true;
         }
@@ -935,9 +938,10 @@ static json_send_status send_json_body_chunk(esp_tls_t *tls, ClientSession &sess
                          body.is_registration ? "link.register" :
                          body.is_heartbeat ? "link.heartbeat" : "control message",
                          (unsigned)dma_free,
-                         (unsigned)(body.is_registration ? REGISTER_MIN_DMA_BYTES
+                         (unsigned)(small_session_msg ? REGISTER_MIN_DMA_BYTES
                                                          : NOISE_TX_DMA_RESERVE_BYTES),
-                         body.is_registration ? " for register" : "",
+                         body.is_registration ? " for register" :
+                         body.is_heartbeat ? " for heartbeat" : "",
                          (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_DMA),
                          (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
                          (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
