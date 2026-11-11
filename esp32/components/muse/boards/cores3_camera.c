@@ -48,6 +48,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "linux/videodev2.h"
+#include "soc/lcd_cam_struct.h"
 
 #define CAM_W 320
 #define CAM_H 240
@@ -166,6 +167,27 @@ static void stream_close(stream_t *s)
 
 static void gc0308_dump_regs(const char *when, bool repair);
 
+/*
+ * The LCD_CAM's RGB<->YUV converter must be off for a raw pass-through. esp_video's DVP device leaves
+ * esp_cam_ctlr_dvp_config_t.output_data_color_type at 0, which differs from the input type, so IDF's
+ * esp_cam_ctlr_dvp_format_conversion() programs a YUV->RGB (or RGB565->?) conversion and sets
+ * CAM_CONV_BYPASS = 1 (despite its name, 1 = converter enabled: TRM "CAM_CONV_BYPASS: 0 bypass, 1 enable").
+ * esp32-camera never touches the converter (bypassed). That mangles the 8-bit stream (Y intact, U/V merged
+ * into one component). The controller is created inside esp_video at STREAMON, so clear the bit afterwards;
+ * stream_grab drops CAM_SETTLE_FRAMES frames first, so no mangled frame is used.
+ */
+static void cam_converter_bypass(const char *when)
+{
+    const uint32_t before = LCD_CAM.cam_rgb_yuv.cam_conv_bypass;
+    LCD_CAM.cam_rgb_yuv.cam_conv_bypass = 0;
+    ESP_LOGI(TAG, "LCD_CAM converter (%s): CAM_CONV_BYPASS was %u (1 = converter on), now %u; 8bits_data_inv %u, "
+             "trans_mode %u, yuv_mode %u, yuv2yuv_mode %u, byte_order %u, bit_order %u",
+             when, (unsigned)before, (unsigned)LCD_CAM.cam_rgb_yuv.cam_conv_bypass,
+             (unsigned)LCD_CAM.cam_rgb_yuv.cam_conv_8bits_data_inv, (unsigned)LCD_CAM.cam_rgb_yuv.cam_conv_trans_mode,
+             (unsigned)LCD_CAM.cam_rgb_yuv.cam_conv_yuv_mode, (unsigned)LCD_CAM.cam_rgb_yuv.cam_conv_yuv2yuv_mode,
+             (unsigned)LCD_CAM.cam_ctrl.cam_byte_order, (unsigned)LCD_CAM.cam_ctrl.cam_bit_order);
+}
+
 /* pixfmt: what S_FMT asks for. repair_yuv: the register check may put 0x24/0x2e back to the YUYV table's
  * values (off for the RGB565 diagnostic, whose 0x24 is meant to differ). */
 static esp_err_t stream_open(stream_t *s, bool require_yuyv, uint32_t pixfmt, bool repair_yuv)
@@ -254,6 +276,7 @@ static esp_err_t stream_open(stream_t *s, bool require_yuyv, uint32_t pixfmt, bo
         return ESP_FAIL;
     }
     s->streaming = true;
+    cam_converter_bypass("after STREAMON");
     vTaskDelay(pdMS_TO_TICKS(50));
     gc0308_dump_regs("after STREAMON", repair_yuv);
     return ESP_OK;
