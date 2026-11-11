@@ -30,6 +30,8 @@ static const char *TAG = "muse_wake";
  * with something else (and may have been speaking). */
 #define IDLE_GAP_US 150000
 #define COOLDOWN_US 2500000
+#define WAKE_STACK_PSRAM 12288
+#define WAKE_STACK_INTERNAL 8192
 
 static const esp_wn_iface_t *s_wn;
 static model_iface_data_t *s_data;
@@ -69,10 +71,11 @@ static void wake_task(void *arg)
                                           pdMS_TO_TICKS(1000));
         if (esp_timer_get_time() >= next_stats) {
             next_stats += STATS_US;
-            ESP_LOGI(TAG, "alive: fed=%u sent=%u dropped=%u gaps=%u maxgap=%ums level=%.1f dBFS detects=%u maxdetect=%uus",
+            ESP_LOGI(TAG, "alive: fed=%u sent=%u dropped=%u gaps=%u maxgap=%ums level=%.1f dBFS detects=%u maxdetect=%uus stackfree=%uB",
                      atomic_load(&s_fed), atomic_load(&s_sent), atomic_load(&s_dropped), atomic_load(&s_gaps),
                      atomic_exchange(&s_max_gap_ms, 0), atomic_load(&s_last_db10) / 10.0f,
-                     atomic_exchange(&s_detects, 0), atomic_exchange(&s_max_detect_us, 0));
+                     atomic_exchange(&s_detects, 0), atomic_exchange(&s_max_detect_us, 0),
+                     (unsigned)uxTaskGetStackHighWaterMark(NULL));
         }
         if (got == 0) continue;
         if (gen != atomic_load(&s_gen)) {
@@ -163,8 +166,21 @@ bool muse_wake_start(void)
         return false;
     }
     atomic_store(&s_hold_until, esp_timer_get_time() + COOLDOWN_US);
-    if (xTaskCreatePinnedToCoreWithCaps(wake_task, "muse_wake", 8192, NULL, 4, NULL, MUSE_AUDIO_CORE,
-                                        MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) != pdPASS) {
+    /* The stack goes in PSRAM: after create() the largest internal block is
+     * only a few KB, too small for an internal stack. The detector runs
+     * esp-dl on heap buffers only (no DMA, no ISR, no flash/cache-off work on
+     * this task), so an external stack is safe; internal RAM is the fallback. */
+    const char *where = "psram";
+    BaseType_t created = xTaskCreatePinnedToCoreWithCaps(wake_task, "muse_wake", WAKE_STACK_PSRAM, NULL, 4, NULL,
+                                                         MUSE_AUDIO_CORE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (created != pdPASS) {
+        ESP_LOGW(TAG, "wake task stack in PSRAM failed; trying internal RAM (largest block %u)",
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+        where = "internal";
+        created = xTaskCreatePinnedToCoreWithCaps(wake_task, "muse_wake", WAKE_STACK_INTERNAL, NULL, 4, NULL,
+                                                  MUSE_AUDIO_CORE, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    }
+    if (created != pdPASS) {
         ESP_LOGE(TAG, "no wake task (free internal %u, largest block %u): wake word off",
                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
@@ -174,6 +190,8 @@ bool muse_wake_start(void)
         s_data = NULL;
         return false;
     }
+    ESP_LOGI(TAG, "wake task started (stack in %s, free internal %u)", where,
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
     ESP_LOGI(TAG, "ready model=%s", name);
     ESP_LOGI(TAG, "listening for \"%s\" (%s, chunk %d samples)", s_wn->get_word_name(s_data, 1), name,
              s_wn->get_samp_chunksize(s_data));
