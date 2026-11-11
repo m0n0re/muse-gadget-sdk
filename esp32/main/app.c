@@ -42,6 +42,7 @@
 #include <math.h>
 #if CONFIG_MUSE_BOARD_M5STACK_CORES3
 #include "muse_led.h"
+#include "muse_look.h"
 #include "muse_servo.h"
 #include "muse_state.h"
 #endif
@@ -1716,6 +1717,31 @@ static void speak_done(void *user, bool ok, const char *code, const char *messag
 #endif
 
 #if CONFIG_MUSE_BOARD_M5STACK_CORES3
+// camera.look: a local extension of this fork. Replies once the picture has been
+// delivered to CONFIG_MUSE_CAMERA_ENDPOINT, with the file name it answered.
+typedef struct {
+    noise_ctrl_session_generation_t session_generation;
+    char request_id[64];
+} look_ctx_t;
+
+static void look_done(void *user, bool ok, const char *code, const char *message, const char *file, size_t bytes) {
+    look_ctx_t *ctx = user;
+    cJSON *result = cJSON_CreateObject();
+    cJSON_AddBoolToObject(result, "ok", ok);
+    if (ok) {
+        cJSON_AddStringToObject(result, "file", file);
+        cJSON_AddNumberToObject(result, "bytes", (double)bytes);
+        cJSON_AddNumberToObject(result, "width", 320);
+        cJSON_AddNumberToObject(result, "height", 240);
+    } else {
+        cJSON *error = cJSON_AddObjectToObject(result, "error");
+        cJSON_AddStringToObject(error, "code", code ? code : "look_failed");
+        cJSON_AddStringToObject(error, "message", message ? message : "camera.look failed");
+    }
+    noise_ctrl_send_command_result(ctx->session_generation, ctx->request_id, result);
+    free(ctx);
+}
+
 // head.move / head.gesture / head.state: local extensions of this fork.
 typedef struct {
     noise_ctrl_session_generation_t session_generation;
@@ -2102,6 +2128,20 @@ static cJSON *on_ws_command(
     }
 #endif
 #if CONFIG_MUSE_BOARD_M5STACK_CORES3
+    if (strcmp(command, "camera.look") == 0) {
+        look_ctx_t *ctx = calloc(1, sizeof(*ctx));
+        if (!ctx) return command_error("out_of_memory", "failed to allocate");
+        ctx->session_generation = session_generation;
+        strncpy(ctx->request_id, request_id, sizeof(ctx->request_id) - 1);
+        const char *code, *message;
+        if (!muse_look_start(look_done, ctx, &code, &message)) {
+            free(ctx);
+            return command_error(code, message);
+        }
+        cJSON *async = cJSON_CreateObject();
+        cJSON_AddBoolToObject(async, "_async", true);
+        return async;
+    }
     if (strcmp(command, "led.set") == 0) {
         cJSON *jr = cJSON_GetObjectItem(params, "r");
         cJSON *jg = cJSON_GetObjectItem(params, "g");

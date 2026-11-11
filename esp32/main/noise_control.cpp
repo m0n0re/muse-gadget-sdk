@@ -1602,6 +1602,16 @@ static char *build_register_json(void) {
 #endif
 
 #if CONFIG_MUSE_BOARD_M5STACK_CORES3
+    // Local extension of this fork: look through the StackChan's camera (muse_look.c).
+    add_command(commands, "camera.look",
+                "Take one picture with the camera (320x240 JPEG), upload it to the "
+                "camera endpoint and reply with the stored file name in \"file\". "
+                "Shows the thinking state while it works. Fails with \"busy\" if a "
+                "conversation turn, call, speech or another picture is active; "
+                "retry later.",
+                nullptr, nullptr);
+    cJSON_AddNumberToObject(
+        cJSON_GetObjectItem(commands, "camera.look"), "timeout_ms", 20000);
     // Local extension of this fork: the StackChan neck servos (muse_servo.c).
     {
         cJSON *move_required = cJSON_CreateObject();

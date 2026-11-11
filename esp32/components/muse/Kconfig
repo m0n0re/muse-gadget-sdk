@@ -458,6 +458,16 @@ menu "Muse"
             Empty keeps replies silent, shown as captions. If the request
             fails before audio starts, that message is shown silently.
 
+    config MUSE_CAMERA_ENDPOINT
+        string "Camera HTTP endpoint for camera.look pictures"
+        depends on MUSE_BOARD_M5STACK_CORES3
+        default "http://192.168.24.52:50023/capture"
+        help
+            Full URL that camera.look POSTs the JPEG (320x240, Content-Type
+            image/jpeg) to. It answers 200 with the name the picture was
+            stored under, either as JSON ({"filename": "..."}) or as plain
+            text; camera.look returns that name. Empty turns camera.look off.
+
     config MUSE_REALTIME_VOICE
         bool "Live voice calls with Muse (experimental)"
         depends on (MUSE_HATCH || HOMEHUB_VOICE) && SPIRAM

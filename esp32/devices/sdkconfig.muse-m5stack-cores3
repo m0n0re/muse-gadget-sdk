@@ -61,6 +61,13 @@ CONFIG_MUSE_CJK_FONT=y
 CONFIG_MUSE_REALTIME_VOICE=y
 CONFIG_MUSE_TTS_ENDPOINT="http://192.168.24.52:50022/say"
 
+# camera.look: GC0308 320x240 YUYV through esp_video (DVP), JPEG-encoded and POSTed to
+# CONFIG_MUSE_CAMERA_ENDPOINT (its default is this URL; set here so the profile says so).
+CONFIG_MUSE_CAMERA_ENDPOINT="http://192.168.24.52:50023/capture"
+CONFIG_CAMERA_GC0308=y
+CONFIG_CAMERA_GC0308_DVP_YUV422_YUYV_320X240_20FPS=y
+CONFIG_CAMERA_GC0308_DVP_DEFAULT_FMT_YUV422_YUYV_320X240_20FPS=y
+
 # Wake word "Hi Muse" (ESP-SR WakeNet10, only this model). The model lives in the
 # "model" partition added by partitions_muse_cores3.csv.
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_muse_cores3.csv"

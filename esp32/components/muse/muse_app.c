@@ -27,6 +27,7 @@
 #include "muse_chat.h"
 #include "muse_input.h"
 #include "muse_led.h"
+#include "muse_look.h"
 #include "muse_servo.h"
 #include "muse_settings.h"
 #include "muse_state.h"
@@ -76,6 +77,7 @@ void muse_app_run(const muse_board_t *board)
     ESP_ERROR_CHECK(board->init());
     muse_servo_start();   /* CoreS3 only: powers the neck servos and moves them to neutral (its own task) */
     muse_led_start();     /* CoreS3 only: base LEDs follow the avatar mode (its own task) */
+    muse_look_init();     /* CoreS3 only: registers the camera for camera.look (powered only per picture) */
     ESP_ERROR_CHECK(muse_settings_init());
     muse_settings_set_listener(on_setting);
     muse_state_init();
