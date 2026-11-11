@@ -53,6 +53,17 @@ uint32_t muse_pixel_working_accent(void);
 /* Render one frame into Muse's own MUSE_PX_W x MUSE_PX_H grid. */
 void muse_pixel_render(const muse_pose_t *pose);
 
+/*
+ * Optional, for boards with .avatar_wide: draw Muse natively on a wide
+ * pw x ph screen rectangle instead of the square MUSE_PX_W x MUSE_PX_H grid.
+ * Returns true and the grid size in *grid_w x *grid_h (muse_pixel_render then
+ * draws that grid and muse_pixel_scale blows it up to pw x ph), or false when
+ * the renderer can't; the UI then keeps the square layout. A renderer without
+ * it (the UI links a weak default returning false) stays square. Calling
+ * muse_pixel_set_size() goes back to the square grid.
+ */
+bool muse_pixel_wide(int pw, int ph, int *grid_w, int *grid_h);
+
 /* Size (square, in screen pixels) muse_pixel_scale() blows the grid up to. */
 void muse_pixel_set_size(int px);
 

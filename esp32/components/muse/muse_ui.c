@@ -101,7 +101,10 @@ static int s_w, s_h;
 static bool s_small;
 static bool s_tall;         /* compact, with room above and below Muse (StickS3) */
 static bool s_long;         /* tall enough for a page of the reply under Muse */
-static int s_canvas_px;     /* Muse's size on screen */
+static int s_canvas_px;     /* Muse's size on screen (its width) */
+static bool s_avatar_wide;  /* full-width face on a wide grid, not the square one */
+static int s_canvas_h;      /* its height: s_canvas_px, or the wide face's */
+static int s_gw = MUSE_PX_W, s_gh = MUSE_PX_H;   /* the renderer's grid, in cells */
 static int s_dy;            /* full layout: offset from a 466 px tall screen */
 static lv_indev_t *s_indev;
 static lv_obj_t *s_tv;
@@ -261,6 +264,10 @@ static const char *const MODE_NAMES[MUSE_MODE_COUNT] = {
 #define STRIPS LV_DRAW_SW_DRAW_UNIT_CNT
 
 #define MUSE_PIXEL_MAX_PX 512   /* muse_pixel_set_size's cap */
+#define WIDE_TOP 38             /* wide face: under the status row (a 16 px label at y=22) */
+#define WIDE_BOTTOM_MARGIN 22   /* ... and above the page dots */
+#define MUSE_PX_H_MAX 64        /* most grid rows a renderer may use (the wide one has 56 at most)
+ */
 #define DIRTY_RECTS_MAX 8       /* with the meter and labels, well inside LVGL's 32 areas */
 #define DIRTY_MERGE_PX 2048     /* pixels that cost about one walk of the widget tree */
 
@@ -333,10 +340,12 @@ static void muse_image_init(void)
     s_muse_src.header.magic = LV_IMAGE_HEADER_MAGIC;
     s_muse_src.header.cf = LV_COLOR_FORMAT_RGB565;
     s_muse_src.header.w = s_canvas_px;
-    s_muse_src.header.h = s_canvas_px;
+    s_muse_src.header.h = s_canvas_h;
     s_muse_src.header.stride = s_canvas_px * sizeof(uint16_t);
     s_muse_src.data = (const uint8_t *)&s_muse_src;   /* LVGL skips sources without data */
-    muse_pixel_set_size(s_canvas_px);
+    if (!s_avatar_wide) {
+        muse_pixel_set_size(s_canvas_px);   /* the wide grid was set up in muse_ui_start */
+    }
 
     for (int i = 0; i < STRIPS; i++) {
         s_strips[i] = lv_draw_buf_create(s_canvas_px, STRIP_ROWS, LV_COLOR_FORMAT_RGB565, LV_STRIDE_AUTO);
@@ -350,7 +359,7 @@ static void muse_image_init(void)
     lv_image_decoder_set_close_cb(dec, muse_dec_close);
     dec->name = "muse";
 
-    s_cells = heap_caps_malloc(MUSE_PX_W * MUSE_PX_H * sizeof(uint16_t), MUSE_BIG_CAPS);
+    s_cells = heap_caps_malloc(s_gw * s_gh * sizeof(uint16_t), MUSE_BIG_CAPS);
     s_cell_row = heap_caps_malloc(MUSE_PIXEL_MAX_PX * sizeof(uint16_t), MUSE_BIG_CAPS);
     if (!s_cells || !s_cell_row) {
         free(s_cells);
@@ -367,9 +376,9 @@ static void muse_image_init(void)
  * drawn for nothing cost less than LVGL's walk of the widget tree for one more
  * area.
  */
-static int32_t cell_px(int cell, int size)
+static int32_t cell_px(int cell, int size, int cells)
 {
-    return (cell * size + MUSE_PX_W - 1) / MUSE_PX_W;   /* a cell's first screen pixel */
+    return (cell * size + cells - 1) / cells;   /* a cell's first screen pixel */
 }
 
 static int32_t rect_cells(const lv_area_t *r)
@@ -384,15 +393,16 @@ static void invalidate_muse(void)
         return;
     }
     int size = (int)s_muse_src.header.w;
-    lv_area_t r[MUSE_PX_H];   /* in cells */
+    int size_h = (int)s_muse_src.header.h;
+    lv_area_t r[MUSE_PX_H_MAX];   /* in cells */
     int n = 0;
-    for (int cy = 0; cy < MUSE_PX_H; cy++) {
-        int32_t y = cell_px(cy, size);
+    for (int cy = 0; cy < s_gh; cy++) {
+        int32_t y = cell_px(cy, size_h, s_gh);
         muse_pixel_scale(s_cell_row, size, 0, size - 1, y, y);
-        uint16_t *last = &s_cells[cy * MUSE_PX_W];
+        uint16_t *last = &s_cells[cy * s_gw];
         int x1 = -1, x2 = -1;
-        for (int cx = 0; cx < MUSE_PX_W; cx++) {
-            uint16_t c = s_cell_row[cell_px(cx, size)];
+        for (int cx = 0; cx < s_gw; cx++) {
+            uint16_t c = s_cell_row[cell_px(cx, size, s_gw)];
             if (c != last[cx] || !s_cells_valid) {
                 last[cx] = c;
                 x1 = x1 < 0 ? cx : x1;
@@ -405,7 +415,7 @@ static void invalidate_muse(void)
     }
     s_cells_valid = true;
 
-    int64_t merge_cells = (int64_t)DIRTY_MERGE_PX * MUSE_PX_W * MUSE_PX_H / (size * size);
+    int64_t merge_cells = (int64_t)DIRTY_MERGE_PX * s_gw * s_gh / (size * size_h);
     while (n > 1) {
         int best = 0;
         int32_t best_cost = INT32_MAX;
@@ -431,10 +441,10 @@ static void invalidate_muse(void)
     lv_obj_get_coords(s_canvas, &at);
     for (int i = 0; i < n; i++) {
         lv_area_t a = {
-            at.x1 + cell_px(r[i].x1, size),
-            at.y1 + cell_px(r[i].y1, size),
-            at.x1 + cell_px(r[i].x2 + 1, size) - 1,
-            at.y1 + cell_px(r[i].y2 + 1, size) - 1,
+            at.x1 + cell_px(r[i].x1, size, s_gw),
+            at.y1 + cell_px(r[i].y1, size_h, s_gh),
+            at.x1 + cell_px(r[i].x2 + 1, size, s_gw) - 1,
+            at.y1 + cell_px(r[i].y2 + 1, size_h, s_gh) - 1,
         };
         lv_obj_invalidate_area(s_canvas, &a);
     }
@@ -760,8 +770,8 @@ static void build_speaker(lv_obj_t *face, int x, int y)
 
 static void set_canvas_px(int px)
 {
-    if ((int)s_muse_src.header.w == px) {
-        return;
+    if ((int)s_muse_src.header.w == px || s_avatar_wide) {
+        return;   /* the wide face never resizes */
     }
     s_muse_src.header.w = px;
     s_muse_src.header.h = px;
@@ -1198,7 +1208,8 @@ static void build_screen(void)
     int cap_top = cap_bottom - cap_h;
     int meter_y = cap_top - 6 - METER_SEG_PX / 2;
     int art_bottom = meter_y - METER_SEG_PX / 2 - 4;
-    s_big_y = s_small ? 0 : art_bottom - (s_canvas_px / 2 - ART_BLANK_ROWS * (s_canvas_px / MUSE_PX_W));
+    s_big_y = s_avatar_wide ? WIDE_TOP + s_canvas_h / 2 - s_h / 2
+              : s_small ? 0 : art_bottom - (s_canvas_px / 2 - ART_BLANK_ROWS * (s_canvas_px / MUSE_PX_W));
 #if CONFIG_MUSE_BOARD_SPOTPEAR_ESP32_AI_128
     /* The 128 px avatar ends at y=159; Japanese captions start at y=164. */
     s_big_y = -25;
@@ -1823,6 +1834,12 @@ static void update_power(float now)
 }
 
 /* An avatar without a working pose keeps THINKING's accent. */
+__attribute__((weak)) bool muse_pixel_wide(int pw, int ph, int *grid_w, int *grid_h)
+{
+    (void)pw; (void)ph; (void)grid_w; (void)grid_h;
+    return false;
+}
+
 __attribute__((weak)) uint32_t muse_pixel_working_accent(void)
 {
     return 0;
@@ -2198,6 +2215,19 @@ esp_err_t muse_ui_start(void)
     if (s_canvas_px > s_w) {
         s_canvas_px = s_w / MUSE_PX_W * MUSE_PX_W;
     }
+    s_canvas_h = s_canvas_px;
+    if (muse_board->avatar_wide && s_small && !s_tall) {
+        /* Full width, between the header and the page dots. A renderer that
+         * can't draw it keeps the square layout above. */
+        int gw, gh, ph = s_h - WIDE_TOP - WIDE_BOTTOM_MARGIN;
+        if (muse_pixel_wide(s_w, ph, &gw, &gh) && gh <= MUSE_PX_H_MAX) {
+            s_avatar_wide = true;
+            s_gw = gw;
+            s_gh = gh;
+            s_canvas_px = s_w;
+            s_canvas_h = ph;
+        }
+    }
     s_dy = (s_h - 466) / 2;
     if (!s_small && muse_board->round && s_dy < 0) {
         /* A shorter screen moves the labels out towards its edges, but a
@@ -2226,7 +2256,8 @@ esp_err_t muse_ui_start(void)
     s_ready = true;
     muse_board->display_unlock();
 
-    ESP_LOGI(TAG, "UI up: %dx%d, %d px Muse, %d ms frames", s_w, s_h, s_canvas_px, muse_board->frame_ms);
+    ESP_LOGI(TAG, "UI up: %dx%d, %dx%d px Muse (%dx%d grid), %d ms frames", s_w, s_h, s_canvas_px, s_canvas_h,
+             s_gw, s_gh, muse_board->frame_ms);
     return ESP_OK;
 }
 

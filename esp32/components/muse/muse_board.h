@@ -105,6 +105,10 @@ typedef struct {
     bool flat_menu_hints;
     int frame_ms;           /* face animation period */
     int avatar_px;          /* optional avatar canvas size; 0 uses the UI default */
+    /* Opt in to a full-width avatar between the header and the page dots, drawn
+     * natively on a wide grid. Compact layout only, and only with a renderer
+     * that provides muse_pixel_wide(); otherwise the square layout is used. */
+    bool avatar_wide;
 
     /* Power rails, buses, expanders. Runs first. */
     esp_err_t (*init)(void);
