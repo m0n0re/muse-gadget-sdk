@@ -44,7 +44,7 @@ static const char *TAG = "servo";
 #define YAW_ZERO_RAW 460
 #define PITCH_ZERO_RAW 620
 #define SEED_YAW 0.0f
-#define SEED_PITCH 45.0f
+#define SEED_PITCH 20.0f
 
 #define IOE_ADDR 0x6F
 #define IOE_MODE 0x03   /* 16 bits, IO1 in bit 0; 1 = output */

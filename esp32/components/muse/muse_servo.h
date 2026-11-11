@@ -25,7 +25,7 @@ extern "C" {
 #define MUSE_SERVO_PITCH_MIN 5.0f
 #define MUSE_SERVO_PITCH_MAX 85.0f
 #define MUSE_SERVO_NEUTRAL_YAW 0.0f
-#define MUSE_SERVO_NEUTRAL_PITCH 45.0f
+#define MUSE_SERVO_NEUTRAL_PITCH 20.0f
 
 typedef enum {
     MUSE_GESTURE_NOD,
