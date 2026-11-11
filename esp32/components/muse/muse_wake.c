@@ -207,7 +207,7 @@ void muse_wake_set_ready_check(bool (*ready)(void))
 
 #define DEFER_TIMEOUT_S 150
 #define DEFER_STACK 12288
-#define RUNNER_STACK 8192   /* internal RAM; largest free block was ~12.8 KB at start time */
+#define RUNNER_STACK 4096   /* internal RAM; measured high-water use is 2324 bytes */
 
 static void wake_runner_task(void *arg)
 {

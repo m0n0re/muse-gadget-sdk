@@ -19,6 +19,7 @@
 #include "stack_monitor.h"
 #include "noise_upgrade.h"
 #include "noise_tunnel_internal.h"
+#include "noise_tunnel.h"
 #include "ws_mask.h"
 #if CONFIG_HOMEHUB_FAST_GCM
 #include "fast_gcm.h"
@@ -1974,6 +1975,15 @@ static void reconnect_delay(uint32_t delay_ms) {
 
 // ---- Session loop -----------------------------------------------------------
 
+// Allocation-free substring test for the register reply when cJSON can't parse.
+static bool bytes_contain(const char *hay, size_t hay_len, const char *needle) {
+    size_t n = strlen(needle);
+    for (size_t i = 0; n && i + n <= hay_len; i++) {
+        if (memcmp(hay + i, needle, n) == 0) return true;
+    }
+    return false;
+}
+
 // Process one inbound RX body-chunk message from the server. The Noise layer
 // gives us reassembled service frames; inside is a stream-1 BodyChunk whose
 // data is one or more u32-LE prefixed JSON messages.
@@ -2029,6 +2039,28 @@ static void process_inbound_body_chunk(
                         }
                     }
                     cJSON_Delete(msg);
+                } else {
+                    // cJSON could not allocate (internal RAM is tight with the
+                    // wake word resident), so the ack went unnoticed and the
+                    // tunnel stream (raw) was never opened. Log it, and accept
+                    // the reply by its request id when it carries no error.
+                    const char *body = reinterpret_cast<const char *>(p);
+                    bool has_id = false;
+                    size_t idlen = strlen(s_register_req_id);
+                    for (size_t i = 0; idlen && i + idlen <= msg_len; i++) {
+                        if (memcmp(body + i, s_register_req_id, idlen) == 0) { has_id = true; break; }
+                    }
+                    ESP_LOGW(TAG, "register reply parse failed (%u bytes, id match %d; free internal %u, largest %u)",
+                             (unsigned)msg_len, (int)has_id,
+                             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+                    if (has_id) {
+                        if (!bytes_contain(body, msg_len, "\"error\"")) {
+                            s_register_acked = true;
+                            s_heartbeat_registered = bytes_contain(body, msg_len, "\"registered\"");
+                            ESP_LOGI(TAG, "link.register acked (id match, no JSON parse); tunnel may open");
+                        }
+                    }
                 }
             }
             handle_invoke_request(reinterpret_cast<const char *>(p), msg_len,
@@ -2267,6 +2299,9 @@ static session_result_t run_session(stack_monitor_t *stack) {
 #if CONFIG_HOMEHUB_TUNNEL
         if (!tunnel_opened && s_register_acked) {
             tunnel_opened = true;
+            ESP_LOGI(TAG, "opening tunnel stream (free internal %u, largest %u)",
+                     (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                     (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
             if (!noise_tunnel_on_session_up(&tun_emit)) {
                 ESP_LOGW(TAG, "tunnel stream open failed; checking Noise session health below");
             }
@@ -2449,6 +2484,20 @@ static session_result_t run_session(stack_monitor_t *stack) {
             }
         }
 #endif
+
+        // Why raw stays down: say so every 10 s while it is (register not acked
+        // yet, or the stream open keeps failing).
+        {
+            static uint64_t s_next_raw_log_us = 0;
+            uint64_t t = esp_timer_get_time();
+            if (!noise_tunnel_is_connected() && t >= s_next_raw_log_us) {
+                s_next_raw_log_us = t + 10 * 1000000ULL;
+                ESP_LOGW(TAG, "raw down: register_acked=%d tunnel_opened=%d (free internal %u, largest %u)",
+                         (int)s_register_acked, (int)tunnel_opened,
+                         (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                         (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+            }
+        }
 
         // Retry opening the tunnel stream if it went down while control is up
         // (e.g. transient backend 503). Rate-limited internally. Only after the
