@@ -207,6 +207,15 @@ void muse_wake_set_ready_check(bool (*ready)(void))
 
 #define DEFER_TIMEOUT_S 150
 #define DEFER_STACK 12288
+#define RUNNER_STACK 8192   /* internal RAM; largest free block was ~12.8 KB at start time */
+
+static void wake_runner_task(void *arg)
+{
+    (void)arg;
+    if (!muse_wake_start()) ESP_LOGW(TAG, "wake word not running (see muse_wake log)");
+    ESP_LOGI(TAG, "start task done (stack high-water %u bytes free)", (unsigned)uxTaskGetStackHighWaterMark(NULL));
+    vTaskDelete(NULL);
+}
 
 static void wake_starter_task(void *arg)
 {
@@ -226,7 +235,19 @@ static void wake_starter_task(void *arg)
     } else {
         ESP_LOGI(TAG, "deferred start: trigger=%s", why);
     }
-    if (!muse_wake_start()) ESP_LOGW(TAG, "wake word not running (see muse_wake log)");
+    /* muse_wake_start() loads the model from flash, which freezes the cache:
+     * the calling task's stack must be internal RAM (a PSRAM stack asserts in
+     * s_task_stack_is_sane_when_cache_frozen). So this PSRAM-stack poller only
+     * waits; the start itself runs on a short-lived internal-stack task. */
+    BaseType_t ok = xTaskCreatePinnedToCoreWithCaps(wake_runner_task, "muse_wake_run", RUNNER_STACK, NULL, 3, NULL,
+                                                    MUSE_AUDIO_CORE, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (ok != pdPASS) {
+        ESP_LOGE(TAG, "could not create the internal-stack wake start task (free internal %u, largest %u): wake word off",
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+    } else {
+        ESP_LOGI(TAG, "start runs on task muse_wake_run (internal stack %d bytes)", RUNNER_STACK);
+    }
     vTaskDelete(NULL);
 }
 

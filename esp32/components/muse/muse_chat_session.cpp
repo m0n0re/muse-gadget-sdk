@@ -999,6 +999,7 @@ static bool ensure_connected(void)
         if (connect_once(err, sizeof(err), &status)) {
             /* The settings page shows the VM in its VM ID row. */
             muse_hatch_report_vm(s_vm.vm_id);
+            ESP_LOGI(TAG, "connected to Muse's VM (session established)");
             muse_hatch_report(MUSE_HATCH_REACHABLE, "");
             return true;
         }
