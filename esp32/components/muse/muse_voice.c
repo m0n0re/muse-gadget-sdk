@@ -37,6 +37,7 @@
 #include "muse_mem.h"
 #include "muse_settings.h"
 #include "muse_state.h"
+#include "muse_wake.h"
 #include "muse_wifi.h"
 #if CONFIG_MUSE_REALTIME_VOICE
 #include "muse_voice_call.h"
@@ -247,6 +248,9 @@ static void idle_capture(void)
         s_settle--;
         return;
     }
+    /* Idle is the only time the wake word borrows the microphone: it is fed
+     * the chunk this task just read, never read from the audio input itself. */
+    muse_wake_feed(s_chunk, MUSE_AUDIO_CHUNK);
     pre_put_preroll();
 }
 
@@ -1337,6 +1341,20 @@ static void voice_task(void *arg)
             /* The 20 ms read paces this loop. */
             idle_capture();
             if (xQueueReceive(s_queue, &ev, 0) != pdTRUE) {
+#if CONFIG_MUSE_WAKE_WORD_HI_MUSE && CONFIG_MUSE_REALTIME_VOICE
+                /* "Hi Muse": the same live call a tap on the talk button starts
+                 * (note_held() -> NOTE_TAP -> run_call(false, 0) below). */
+                if (muse_wake_take() && !atomic_load(&s_shutdown) && muse_voice_call_ready()) {
+                    ESP_LOGI(TAG, "wake word: starting a call");
+                    muse_state_set_asleep(false);
+                    muse_state_poke();
+                    muse_wifi_power(MUSE_WIFI_FULL);
+                    s_press_input_epoch = muse_input_call_epoch();
+                    s_press_mark = 0;
+                    run_call(false, 0);
+                    pre_reset();
+                }
+#endif
                 continue;
             }
             muse_state_poke();
@@ -1448,6 +1466,7 @@ esp_err_t muse_voice_start(QueueHandle_t queue)
         muse_state_set_caption("AUDIO INIT FAILED");
         return ESP_FAIL;
     }
+    muse_wake_start();   /* logs and carries on without a wake word if the model is missing */
     /* Stack in PSRAM if there is any (this task never writes flash) to spare internal RAM for Wi-Fi/BLE. */
     if (xTaskCreatePinnedToCoreWithCaps(voice_task, "muse_voice", 6144, NULL, 6, NULL, MUSE_AUDIO_CORE,
                                         MUSE_BIG_CAPS) != pdPASS) {

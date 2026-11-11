@@ -60,3 +60,9 @@ CONFIG_MUSE_CJK_FONT=y
 # Live voice calls with Muse (experimental): reply speech plays on the speaker.
 CONFIG_MUSE_REALTIME_VOICE=y
 CONFIG_MUSE_TTS_ENDPOINT="http://192.168.24.52:50022/say"
+
+# Wake word "Hi Muse" (ESP-SR WakeNet10, only this model). The model lives in the
+# "model" partition added by partitions_muse_cores3.csv.
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_muse_cores3.csv"
+CONFIG_MUSE_WAKE_WORD_HI_MUSE=y
+CONFIG_SR_WN_WN10_HIMUSE=y

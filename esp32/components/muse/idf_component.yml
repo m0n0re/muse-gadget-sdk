@@ -25,6 +25,11 @@ dependencies:
     version: "~3.0"
     rules:
       - if: "$CONFIG{MUSE_BOARD_ID} == \"dfrobot_unihiker_k10\""
+  # Wake word "Hi Muse" (muse_wake.c): WakeNet10 only.
+  espressif/esp-sr:
+    version: "2.6.1"
+    rules:
+      - if: "$CONFIG{MUSE_WAKE_WORD_HI_MUSE} == True"
   lvgl/lvgl:
     version: "9.5.0"
     public: true

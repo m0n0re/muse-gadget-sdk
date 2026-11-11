@@ -474,6 +474,18 @@ menu "Muse"
             played for the idle limit, or at the length limit. Muse's VM
             has to accept voice calls from this gadget's credentials.
 
+    config MUSE_WAKE_WORD_HI_MUSE
+        bool "Wake word \"Hi Muse\" starts a live call (ESP-SR WakeNet10)"
+        depends on MUSE_ENABLED && MUSE_REALTIME_VOICE && IDF_TARGET_ESP32S3
+        default n
+        help
+            While idle, the voice task passes the microphone audio it already
+            reads to the WakeNet10 model wn10_himuse. Hearing "Hi Muse" starts
+            the same live call a tap on the talk button does. Needs the "model"
+            partition (partitions_muse_cores3.csv) and ESP-SR with
+            CONFIG_SR_WN_WN10_HIMUSE. Runs continuously while idle: meant for
+            USB power.
+
     config MUSE_VOICE_NOTE_TOGGLE
         bool "Press once to record a voice note, press again to send"
         depends on MUSE_ENABLED && !MUSE_REALTIME_VOICE
