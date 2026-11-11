@@ -198,6 +198,50 @@ bool muse_wake_start(void)
     return true;
 }
 
+static bool (*s_ready_check)(void);
+
+void muse_wake_set_ready_check(bool (*ready)(void))
+{
+    s_ready_check = ready;
+}
+
+#define DEFER_TIMEOUT_S 150
+#define DEFER_STACK 12288
+
+static void wake_starter_task(void *arg)
+{
+    (void)arg;
+    const char *why = "no ready check";
+    if (s_ready_check) {
+        int waited = 0;
+        while (!s_ready_check()) {
+            if (waited >= DEFER_TIMEOUT_S) break;
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            waited++;
+        }
+        why = waited >= DEFER_TIMEOUT_S ? "timeout, link never came up" : "link up (raw channel up or nothing to wait for)";
+        ESP_LOGI(TAG, "deferred start: trigger=%s after %d s (free internal %u, largest %u)", why, waited,
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+    } else {
+        ESP_LOGI(TAG, "deferred start: trigger=%s", why);
+    }
+    if (!muse_wake_start()) ESP_LOGW(TAG, "wake word not running (see muse_wake log)");
+    vTaskDelete(NULL);
+}
+
+void muse_wake_start_deferred(void)
+{
+    BaseType_t ok = xTaskCreatePinnedToCoreWithCaps(wake_starter_task, "muse_wake_init", DEFER_STACK, NULL, 3, NULL,
+                                                    MUSE_AUDIO_CORE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (ok != pdPASS) {
+        ok = xTaskCreatePinnedToCoreWithCaps(wake_starter_task, "muse_wake_init", DEFER_STACK, NULL, 3, NULL,
+                                             MUSE_AUDIO_CORE, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    }
+    if (ok != pdPASS) ESP_LOGE(TAG, "could not create the deferred wake starter task: wake word off");
+    else ESP_LOGI(TAG, "wake word start deferred until the link is up (max %d s)", DEFER_TIMEOUT_S);
+}
+
 void muse_wake_feed(const int16_t *pcm, size_t frames)
 {
     if (!s_ring) return;

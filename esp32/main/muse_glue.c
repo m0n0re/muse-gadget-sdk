@@ -34,6 +34,7 @@
 #include "config_store.h"
 #include "identity.h"
 #include "noise_control.h"
+#include "noise_tunnel.h"
 #include "sdk_token_console.h"
 #include "stack_monitor.h"
 #include "wifi_known.h"
@@ -644,7 +645,14 @@ static void boot_task(void *arg) {
     vTaskDelete(NULL);
 }
 
+// The wake word loads after the link is up: its model load takes the internal
+// RAM the lease fetch's TLS setup needs. Nothing to wait for when unpaired.
+static bool wake_link_ready(void) {
+    return !config_is_provisioned() || noise_tunnel_is_connected();
+}
+
 void muse_glue_start(void) {
+    muse_wake_set_ready_check(wake_link_ready);
     // Wake word: create the C++ runtime's static-init locks and esp-dl's
     // singleton now, from app_main with the scheduler running and internal RAM
     // still whole, not later from the voice task.
