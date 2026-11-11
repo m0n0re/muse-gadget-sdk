@@ -101,6 +101,8 @@ static void wake_task(void *arg)
 
 bool muse_wake_start(void)
 {
+    ESP_LOGI(TAG, "start: free internal %u, psram %u", (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
     srmodel_list_t *models = esp_srmodel_init(MODEL_PARTITION);
     char *name = models ? esp_srmodel_filter(models, ESP_WN_PREFIX, MODEL_KEY) : NULL;
     if (!name) {
@@ -117,14 +119,28 @@ bool muse_wake_start(void)
         ESP_LOGE(TAG, "%s wants %d Hz x %d ch: wake word off", name, s_wn->get_samp_rate(s_data),
                  s_wn->get_channel_num(s_data));
         s_wn->destroy(s_data);
+        s_data = NULL;
         return false;
     }
     s_ring = xStreamBufferCreateWithCaps(RING_BYTES, 1, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-    if (!s_ring) return false;
+    if (!s_ring) s_ring = xStreamBufferCreateWithCaps(RING_BYTES, 1, MUSE_BIG_CAPS);   /* internal RAM is tight */
+    if (!s_ring) {
+        ESP_LOGE(TAG, "no memory for the audio ring (%d bytes; free internal %u): wake word off", RING_BYTES,
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+        s_wn->destroy(s_data);
+        s_data = NULL;
+        return false;
+    }
     atomic_store(&s_hold_until, esp_timer_get_time() + COOLDOWN_US);
     if (xTaskCreatePinnedToCoreWithCaps(wake_task, "muse_wake", 8192, NULL, 4, NULL, MUSE_AUDIO_CORE,
                                         MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) != pdPASS) {
-        ESP_LOGE(TAG, "no wake task");
+        ESP_LOGE(TAG, "no wake task (free internal %u, largest block %u): wake word off",
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+        vStreamBufferDeleteWithCaps(s_ring);
+        s_ring = NULL;
+        s_wn->destroy(s_data);
+        s_data = NULL;
         return false;
     }
     ESP_LOGI(TAG, "ready model=%s", name);
