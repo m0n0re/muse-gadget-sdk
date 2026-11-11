@@ -1378,9 +1378,9 @@ static void voice_task(void *arg)
                  * now; record() ends it on silence. Not the call a tap starts. */
                 if (!muse_wake_take() || atomic_load(&s_shutdown)) continue;
                 ESP_LOGI(TAG, "wake word: starting a voice note");
+                muse_state_poke_why("wake word");   /* first: leaves MUSE_MODE_SLEEP before the head lifts */
                 muse_servo_listen_pose();   /* a small lift of the head; non-blocking, a no-op off the CoreS3 */
                 muse_state_set_asleep(false);
-                muse_state_poke();
                 s_press_input_epoch = muse_input_call_epoch();
                 s_press_mark = 0;
                 s_press_us = esp_timer_get_time();

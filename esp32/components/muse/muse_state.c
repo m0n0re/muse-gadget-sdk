@@ -20,6 +20,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
@@ -53,6 +54,8 @@ static volatile int s_latin_cols, s_latin_lines;
 static muse_power_t s_power = { .battery_pct = -1 };
 static volatile bool s_as_if_battery;
 
+static const char *TAG = "state";
+
 static float secs_since(int64_t us)
 {
     return (float)(esp_timer_get_time() - us) / 1e6f;
@@ -78,6 +81,9 @@ void muse_state_set_mode(muse_mode_t mode)
     /* Shutting down wins over the voice pipeline finishing a turn. */
     if (s_mode == MUSE_MODE_OFF && mode != MUSE_MODE_IDLE) {
         return;
+    }
+    if (s_mode == MUSE_MODE_SLEEP && mode != MUSE_MODE_IDLE) {
+        ESP_LOGI(TAG, "sleep: woke (mode %d) after %.0f s asleep", (int)mode, secs_since(s_mode_since_us));
     }
     s_mode_since_us = esp_timer_get_time();
     s_mode = mode;
@@ -250,9 +256,28 @@ void muse_state_set_as_if_battery(bool on)
     }
 }
 
-void muse_state_poke(void)
+void muse_state_poke_why(const char *why)
 {
     s_last_poke_us = esp_timer_get_time();
+    if (s_mode == MUSE_MODE_SLEEP) {
+        ESP_LOGI(TAG, "sleep: woke (%s) after %.0f s asleep", why ? why : "interaction", secs_since(s_mode_since_us));
+        muse_state_set_mode(MUSE_MODE_IDLE);
+    }
+}
+
+void muse_state_poke(void)
+{
+    muse_state_poke_why("interaction");
+}
+
+bool muse_state_enter_sleep(const char *why)
+{
+    if (s_mode != MUSE_MODE_IDLE) {
+        return false;
+    }
+    ESP_LOGI(TAG, "sleep: entering (%s), no interaction for %.0f s", why ? why : "idle", muse_state_idle_secs());
+    muse_state_set_mode(MUSE_MODE_SLEEP);
+    return true;
 }
 
 float muse_state_idle_secs(void)

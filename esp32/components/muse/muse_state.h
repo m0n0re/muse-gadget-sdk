@@ -33,6 +33,7 @@ typedef enum {
     MUSE_MODE_SPEAKING,
     MUSE_MODE_ERROR,
     MUSE_MODE_OFF,       /* powering down */
+    MUSE_MODE_SLEEP,     /* long idle: closed eyes and Z, head down (CoreS3); any interaction wakes to IDLE */
     MUSE_MODE_COUNT,
 } muse_mode_t;
 
@@ -93,6 +94,11 @@ void muse_state_set_as_if_battery(bool on);
 
 /* Any user interaction: keeps Muse awake. */
 void muse_state_poke(void);
+/* Same, naming the cause for the log when it wakes MUSE_MODE_SLEEP. Any poke wakes it
+ * (mode back to IDLE); spontaneous motion (idle glances, nods) must not poke. */
+void muse_state_poke_why(const char *why);
+/* Enters MUSE_MODE_SLEEP (logs `why` and the idle seconds). Only from IDLE; returns whether it did. */
+bool muse_state_enter_sleep(const char *why);
 float muse_state_idle_secs(void);
 
 /* Screen sleep (display dark, rendering paused). Waking also pokes. */

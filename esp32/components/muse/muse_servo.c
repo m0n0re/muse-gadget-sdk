@@ -73,6 +73,8 @@ static const char *TAG = "servo";
 #define AMB_PITCH_MAX 28.0f
 #define AMB_NEAR_NEUTRAL_DEG 3.0f   /* only glance from (about) the neutral pose */
 #define AMB_IDLE_SETTLE_S 5.0f      /* mode must have been idle this long */
+#define SLEEP_DOWN_MS 2500          /* head down to the pitch floor when the avatar sleeps */
+#define SLEEP_UP_MS 1500            /* ... and back to neutral on waking */
 #define NOD_DEPTH_MIN 3.0f
 #define NOD_DEPTH_MAX 6.0f
 #define NOD_GAP_MIN_MS 900
@@ -453,6 +455,35 @@ static void speaking_nods(void)
     }
 }
 
+/* Avatar sleep (MUSE_MODE_SLEEP): head down to the pitch floor, back to neutral on waking. */
+static bool s_head_down;   /* worker only: the head was sent down for sleep and is not yet back at neutral */
+static bool s_down_done;
+
+static void sleep_head_down(void)
+{
+    const int M = (int)MUSE_MODE_SLEEP;
+    ESP_LOGI(TAG, "sleep: head down start: pitch %.1f -> %.1f over %d ms", s_cur_pitch, MUSE_SERVO_PITCH_MIN, SLEEP_DOWN_MS);
+    s_head_down = true;
+    s_down_done = false;
+    /* A wake or a command cuts it short; the wake path then returns from wherever the head got to. */
+    if (move_ex(s_cur_yaw, MUSE_SERVO_PITCH_MIN, SLEEP_DOWN_MS, MAX_DPS, M)) {
+        s_down_done = true;
+        ESP_LOGI(TAG, "sleep: head down done: yaw %.1f pitch %.1f", s_cur_yaw, s_cur_pitch);
+    } else {
+        ESP_LOGI(TAG, "sleep: head down cut short at pitch %.1f", s_cur_pitch);
+    }
+}
+
+static void sleep_head_up(const char *why)
+{
+    if (!s_head_down) return;
+    s_head_down = false;
+    ESP_LOGI(TAG, "sleep: waking head (%s): back to neutral over %d ms", why, SLEEP_UP_MS);
+    move_to(MUSE_SERVO_NEUTRAL_YAW, MUSE_SERVO_NEUTRAL_PITCH, SLEEP_UP_MS, MAX_DPS);
+    ESP_LOGI(TAG, "sleep: head back to neutral: yaw %.1f pitch %.1f", s_cur_yaw, s_cur_pitch);
+    amb_schedule();
+}
+
 static void background_tick(void)
 {
     if (atomic_load(&s_job_state) != J_IDLE) return;
@@ -461,6 +492,14 @@ static void background_tick(void)
     if (!st.available || !st.pos_valid) return;
     float secs = 0;
     muse_mode_t m = muse_state_mode(&secs);
+    if (m == MUSE_MODE_SLEEP) {
+        if (!s_head_down) sleep_head_down();
+        return;
+    }
+    if (s_head_down) {
+        sleep_head_up("mode left sleep");
+        return;
+    }
     if (m == MUSE_MODE_SPEAKING) {
         speaking_nods();
     } else if (m == MUSE_MODE_IDLE && secs >= AMB_IDLE_SETTLE_S && s_return_at_us == 0 &&
@@ -532,6 +571,14 @@ static void run_job(void)
         ESP_LOGW(TAG, "job refused: servos do not answer a position read");
         finish(false, "servo_unreachable", "servos did not answer a position read");
         return;
+    }
+    if (s_head_down) {
+        if (kind == JOB_MOVE) {
+            s_head_down = false;   /* the command's own target replaces the sleeping pose */
+            ESP_LOGI(TAG, "sleep: head command while asleep: moving from the lowered pose");
+        } else {
+            sleep_head_up("job arrived");   /* neutral first, so a listen pose or gesture starts from there */
+        }
     }
     switch (kind) {
     case JOB_MOVE:

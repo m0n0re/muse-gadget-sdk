@@ -386,7 +386,7 @@ static void draw_art(int cx, int cy)
 /* ─── The face's state, as last drawn ───────────────────────────────────── */
 
 static const char *const MODE_NAMES[MUSE_MODE_COUNT] = {
-    "WAKING UP", "READY", "LISTENING", "THINKING", "SPEAKING", "ERROR", "GOODBYE",
+    "WAKING UP", "READY", "LISTENING", "THINKING", "SPEAKING", "ERROR", "GOODBYE", "SLEEPING",
 };
 
 struct Face {

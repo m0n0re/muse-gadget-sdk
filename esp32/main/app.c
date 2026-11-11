@@ -2013,6 +2013,11 @@ static cJSON *bug_report_command(
 static cJSON *on_ws_command(
     const char *command, cJSON *params, const char *request_id,
     noise_ctrl_session_generation_t session_generation) {
+    // Any received command counts as an interaction: it wakes MUSE_MODE_SLEEP (and restarts the idle timer).
+    // Read-only status queries do not (a host may poll them).
+#if CONFIG_MUSE_BOARD_M5STACK_CORES3
+    if (strcmp(command, "head.state") != 0 && strcmp(command, "device.list_vms") != 0) muse_state_poke_why(command);
+#endif
 #if CONFIG_HOMEHUB_BLE_COMMANDS
     if (ble_commands_handles(command)) {
         return ble_commands_handle(command, params, request_id, session_generation);

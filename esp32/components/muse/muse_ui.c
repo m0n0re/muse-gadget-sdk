@@ -249,6 +249,7 @@ static const char *const MODE_NAMES[MUSE_MODE_COUNT] = {
     [MUSE_MODE_SPEAKING] = "SPEAKING",
     [MUSE_MODE_ERROR] = "ERROR",
     [MUSE_MODE_OFF] = "GOODBYE",
+    [MUSE_MODE_SLEEP] = "SLEEPING",
 };
 
 /*
