@@ -2,6 +2,7 @@
 
 #if CONFIG_MUSE_WAKE_WORD_HI_MUSE
 
+#include <limits.h>
 #include <math.h>
 #include <stdatomic.h>
 #include <stdlib.h>
@@ -12,6 +13,7 @@
 #include "esp_wn_models.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/idf_additions.h"
+#include "freertos/semphr.h"
 #include "freertos/stream_buffer.h"
 #include "freertos/task.h"
 #include "model_path.h"
@@ -103,6 +105,29 @@ bool muse_wake_start(void)
 {
     ESP_LOGI(TAG, "start: free internal %u, psram %u", (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+    ESP_LOGI(TAG, "start: largest internal block %u, heap integrity %s",
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
+             heap_caps_check_integrity_all(false) ? "ok" : "CORRUPT");
+    /* The first C++ function-local static after the scheduler starts makes
+     * the C++ runtime (__cxa_guard_acquire) create a mutex and a counting
+     * semaphore, and it abort()s if either fails. esp-dl's
+     * ModuleCreator::get_instance() is such a static. Try the same
+     * allocations here first so a failure is a logged "wake word off", not a
+     * reboot loop. */
+    {
+        SemaphoreHandle_t m = xSemaphoreCreateMutex();
+        SemaphoreHandle_t c = xSemaphoreCreateCounting(INT_MAX, 0);
+        bool ok = m && c;
+        if (m) vSemaphoreDelete(m);
+        if (c) vSemaphoreDelete(c);
+        if (!ok) {
+            ESP_LOGE(TAG, "C++ static-init semaphores cannot be created (free internal %u, largest %u): wake word off",
+                     (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                     (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+            return false;
+        }
+        ESP_LOGI(TAG, "C++ static-init probe ok");
+    }
     srmodel_list_t *models = esp_srmodel_init(MODEL_PARTITION);
     char *name = models ? esp_srmodel_filter(models, ESP_WN_PREFIX, MODEL_KEY) : NULL;
     if (!name) {
@@ -110,7 +135,10 @@ bool muse_wake_start(void)
         return false;
     }
     s_wn = esp_wn_handle_from_name(name);
+    ESP_LOGI(TAG, "create %s: begin (free internal %u)", name, (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
     s_data = s_wn ? s_wn->create(name, DET_MODE_90) : NULL;
+    ESP_LOGI(TAG, "create %s: %s (free internal %u)", name, s_data ? "returned" : "FAILED",
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
     if (!s_data) {
         ESP_LOGE(TAG, "could not create %s: wake word off", name);
         return false;
