@@ -237,6 +237,7 @@ bool muse_look_start(muse_look_cb cb, void *ctx, const char **code, const char *
 /* ---- camera.raw ------------------------------------------------------- */
 
 static muse_raw_cb s_raw_cb;
+static cores3_raw_mode_t s_raw_mode;
 
 /* The endpoint's server with the path replaced by /raw: "http://h:p/capture" -> "http://h:p/raw". */
 static bool raw_url(char *out, size_t cap)
@@ -261,9 +262,9 @@ static void raw_task(void *arg)
     uint8_t *data = NULL;
     uint32_t pf = 0;
 
-    esp_err_t err = cores3_camera_capture_raw(&data, &bytes, &w, &h, &pf);
+    esp_err_t err = cores3_camera_capture_raw_mode(s_raw_mode, &data, &bytes, &w, &h, &pf);
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "raw capture failed: %s", esp_err_to_name(err));
+        ESP_LOGW(TAG, "raw capture (mode %d) failed: %s", (int)s_raw_mode, esp_err_to_name(err));
         code = "capture_failed";
         message = "the camera could not take a picture";
         bytes = 0;
@@ -281,8 +282,8 @@ static void raw_task(void *arg)
             code = "upload_failed";
             message = "raw endpoint url too long";
         } else {
-            ESP_LOGI(TAG, "sending raw frame: %u bytes (%dx%d, '%s') to %s; first 16 bytes: %s", (unsigned)bytes, w,
-                     h, fourcc, url, hex);
+            ESP_LOGI(TAG, "sending raw frame (mode %d): %u bytes (%dx%d, '%s') to %s; first 16 bytes: %s", (int)s_raw_mode,
+                     (unsigned)bytes, w, h, fourcc, url, hex);
             ok = upload(url, "application/octet-stream", data, bytes, file, &code, &message);
             if (ok) {
                 ESP_LOGI(TAG, "delivered raw %u bytes as %s", (unsigned)bytes, file);
@@ -300,11 +301,13 @@ static void raw_task(void *arg)
     vTaskDeleteWithCaps(NULL);
 }
 
-bool muse_raw_start(muse_raw_cb cb, void *ctx, const char **code, const char **message)
+bool muse_raw_start(muse_raw_mode_t mode, muse_raw_cb cb, void *ctx, const char **code, const char **message)
 {
     if (!begin(code, message)) {
         return false;
     }
+    s_raw_mode = mode == MUSE_RAW_TESTBAR ? CORES3_RAW_TESTBAR
+                 : mode == MUSE_RAW_RGB565 ? CORES3_RAW_RGB565 : CORES3_RAW_NORMAL;
     s_raw_cb = cb;
     s_ctx = ctx;
     return spawn(raw_task, code, message);

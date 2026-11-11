@@ -37,6 +37,12 @@ const camera_driver_t *cores3_camera_driver(void);
  */
 esp_err_t cores3_camera_capture_raw(uint8_t **data, size_t *len, int *width, int *height, uint32_t *fourcc);
 
+/* Diagnostics: camera.raw (as is), camera.testbar (GC0308 test pattern, reg 0x2e bit 0, on for the frame) and
+ * camera.raw565 (sensor switched to RGB565 through VIDIOC_S_SENSOR_FMT for the frame). All restore on the way out. */
+typedef enum { CORES3_RAW_NORMAL = 0, CORES3_RAW_TESTBAR, CORES3_RAW_RGB565 } cores3_raw_mode_t;
+esp_err_t cores3_camera_capture_raw_mode(cores3_raw_mode_t mode, uint8_t **data, size_t *len, int *width,
+                                         int *height, uint32_t *fourcc);
+
 #ifdef __cplusplus
 }
 #endif

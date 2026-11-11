@@ -1768,7 +1768,8 @@ static void raw_done(void *user, bool ok, const char *code, const char *message,
         cJSON_AddStringToObject(error, "code", code ? code : "raw_failed");
         cJSON_AddStringToObject(error, "message", message ? message : "camera.raw failed");
     }
-    ESP_LOGI(TAG, "camera.raw reply queued: ok=%d (free DMA %u, internal %u)", ok,
+    ESP_LOGI(TAG, "camera.raw/testbar/raw565 reply queued: ok=%d, %u bytes, fourcc '%s' (free DMA %u, internal %u)", ok,
+             (unsigned)bytes, ok ? fourcc : "-",
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_DMA),
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
     noise_ctrl_send_command_result(ctx->session_generation, ctx->request_id, result);
@@ -2175,13 +2176,17 @@ static cJSON *on_ws_command(
         cJSON_AddBoolToObject(async, "_async", true);
         return async;
     }
-    if (strcmp(command, "camera.raw") == 0) {
+    if (strcmp(command, "camera.raw") == 0 || strcmp(command, "camera.testbar") == 0 ||
+        strcmp(command, "camera.raw565") == 0) {
         look_ctx_t *ctx = calloc(1, sizeof(*ctx));
         if (!ctx) return command_error("out_of_memory", "failed to allocate");
         ctx->session_generation = session_generation;
         strncpy(ctx->request_id, request_id, sizeof(ctx->request_id) - 1);
         const char *code, *message;
-        if (!muse_raw_start(raw_done, ctx, &code, &message)) {
+        if (!muse_raw_start(strcmp(command, "camera.testbar") == 0  ? MUSE_RAW_TESTBAR
+                           : strcmp(command, "camera.raw565") == 0 ? MUSE_RAW_RGB565
+                                                                  : MUSE_RAW_NORMAL,
+                        raw_done, ctx, &code, &message)) {
             free(ctx);
             return command_error(code, message);
         }

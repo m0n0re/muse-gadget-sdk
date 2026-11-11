@@ -56,7 +56,8 @@ bool muse_look_start(muse_look_cb cb, void *ctx, const char **code, const char *
  */
 typedef void (*muse_raw_cb)(void *ctx, bool ok, const char *code, const char *message, const char *file,
                             size_t bytes, int width, int height, const char *fourcc);
-bool muse_raw_start(muse_raw_cb cb, void *ctx, const char **code, const char **message);
+typedef enum { MUSE_RAW_NORMAL = 0, MUSE_RAW_TESTBAR, MUSE_RAW_RGB565 } muse_raw_mode_t;
+bool muse_raw_start(muse_raw_mode_t mode, muse_raw_cb cb, void *ctx, const char **code, const char **message);
 #else
 static inline void muse_look_init(void) {}
 #endif

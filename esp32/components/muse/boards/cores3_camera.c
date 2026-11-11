@@ -166,7 +166,9 @@ static void stream_close(stream_t *s)
 
 static void gc0308_dump_regs(const char *when, bool repair);
 
-static esp_err_t stream_open(stream_t *s, bool require_yuyv)
+/* pixfmt: what S_FMT asks for. repair_yuv: the register check may put 0x24/0x2e back to the YUYV table's
+ * values (off for the RGB565 diagnostic, whose 0x24 is meant to differ). */
+static esp_err_t stream_open(stream_t *s, bool require_yuyv, uint32_t pixfmt, bool repair_yuv)
 {
     memset(s, 0, sizeof(*s));
     s->fd = open(BSP_CAMERA_DEVICE, O_RDONLY);
@@ -181,10 +183,11 @@ static esp_err_t stream_open(stream_t *s, bool require_yuyv)
         .type = V4L2_BUF_TYPE_VIDEO_CAPTURE,
         .fmt.pix.width = CAM_W,
         .fmt.pix.height = CAM_H,
-        .fmt.pix.pixelformat = V4L2_PIX_FMT_YUYV,
+        .fmt.pix.pixelformat = pixfmt,
     };
     if (ioctl(s->fd, VIDIOC_S_FMT, &fmt) != 0) {
-        ESP_LOGE(TAG, "S_FMT %dx%d YUYV failed", CAM_W, CAM_H);
+        ESP_LOGE(TAG, "S_FMT %dx%d '%c%c%c%c' failed", CAM_W, CAM_H, (char)(pixfmt & 0xff),
+                 (char)((pixfmt >> 8) & 0xff), (char)((pixfmt >> 16) & 0xff), (char)((pixfmt >> 24) & 0xff));
         return ESP_FAIL;
     }
     if (ioctl(s->fd, VIDIOC_G_FMT, &fmt) == 0) {
@@ -252,7 +255,7 @@ static esp_err_t stream_open(stream_t *s, bool require_yuyv)
     }
     s->streaming = true;
     vTaskDelay(pdMS_TO_TICKS(50));
-    gc0308_dump_regs("after STREAMON", true);
+    gc0308_dump_regs("after STREAMON", repair_yuv);
     return ESP_OK;
 }
 
@@ -355,6 +358,34 @@ static void gc0308_dump_regs(const char *when, bool repair)
     i2c_master_bus_rm_device(dev);
 }
 
+
+/* Diagnostic: read-modify-write one page-0 GC0308 register over SCCB. Returns the value read back. */
+static int gc_update_reg(uint8_t reg, uint8_t mask, uint8_t value)
+{
+    i2c_master_bus_handle_t bus = bsp_i2c_get_handle();
+    i2c_master_dev_handle_t dev = NULL;
+    const i2c_device_config_t dc = {
+        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
+        .device_address = GC0308_ADDR,
+        .scl_speed_hz = 100000,
+    };
+    if (!bus || i2c_master_bus_add_device(bus, &dc, &dev) != ESP_OK) {
+        return -1;
+    }
+    int result = -1;
+    uint8_t v = 0;
+    const uint8_t page0[] = { 0xfe, 0x00 };
+    i2c_master_transmit(dev, page0, sizeof(page0), 100);
+    if (gc_read(dev, reg, &v) == ESP_OK) {
+        const uint8_t w[] = { reg, (uint8_t)((v & ~mask) | (value & mask)) };
+        if (i2c_master_transmit(dev, w, sizeof(w), 100) == ESP_OK && gc_read(dev, reg, &v) == ESP_OK) {
+            result = v;
+        }
+    }
+    i2c_master_bus_rm_device(dev);
+    return result;
+}
+
 /* Drops CAM_SETTLE_FRAMES, then returns the next one (still dequeued) in *out. */
 static esp_err_t stream_grab(stream_t *s, const uint8_t **out, size_t *len)
 {
@@ -399,7 +430,7 @@ static esp_err_t cam_capture(camera_frame_t *out)
     }
     uint8_t *jpg = NULL;
     stream_t s;
-    err = stream_open(&s, true);
+    err = stream_open(&s, true, V4L2_PIX_FMT_YUYV, true);
     if (err == ESP_OK) {
         log_heap("camera running");
         const uint8_t *yuv = NULL;
@@ -455,9 +486,41 @@ static esp_err_t cam_capture(camera_frame_t *out)
     return ESP_OK;
 }
 
-esp_err_t cores3_camera_capture_raw(uint8_t **data, size_t *len, int *width, int *height, uint32_t *fourcc)
+/* RGB565 diagnostic: the YUYV table stays loaded and only 0x24 changes to 0xa6 (the value of esp_cam_sensor's
+ * gc0308_settings_rgb565_be), handed to esp_video as a "customer" sensor format through VIDIOC_S_SENSOR_FMT, so
+ * the DVP driver is told the stream is RGB565 (big-endian: V4L2 RGB565X) too. esp_video keeps the pointer, so
+ * both structs are static. Nothing outlives the capture: camera_down() powers the sensor off, and the next
+ * capture starts from the YUYV default again. */
+static const struct { uint8_t reg, val; } s_rgb565_regs[] = { { 0xfe, 0x00 }, { 0x24, 0xa6 } };
+static esp_cam_sensor_format_t s_rgb565_fmt;
+static esp_cam_sensor_format_t s_yuyv_fmt;
+
+static esp_err_t sensor_to_rgb565(int fd)
 {
+    if (ioctl(fd, VIDIOC_G_SENSOR_FMT, &s_yuyv_fmt) != 0) {
+        ESP_LOGE(TAG, "G_SENSOR_FMT failed");
+        return ESP_FAIL;
+    }
+    s_rgb565_fmt = s_yuyv_fmt;
+    s_rgb565_fmt.name = "DVP_8bit_RGB565_BE_320x240 (0x24=0xa6 on the YUYV table)";
+    s_rgb565_fmt.format = ESP_CAM_SENSOR_PIXFORMAT_RGB565_BE;
+    s_rgb565_fmt.regs = s_rgb565_regs;
+    s_rgb565_fmt.regs_size = sizeof(s_rgb565_regs) / sizeof(s_rgb565_regs[0]);
+    if (ioctl(fd, VIDIOC_S_SENSOR_FMT, &s_rgb565_fmt) != 0) {
+        ESP_LOGE(TAG, "S_SENSOR_FMT (RGB565_BE) failed");
+        return ESP_FAIL;
+    }
+    ESP_LOGI(TAG, "sensor format switched to RGB565_BE (reg 0x24 <- 0xa6)");
+    return ESP_OK;
+}
+
+esp_err_t cores3_camera_capture_raw_mode(cores3_raw_mode_t mode, uint8_t **data, size_t *len, int *width,
+                                         int *height, uint32_t *fourcc)
+{
+    static const char *const names[] = { "raw", "testbar", "raw565" };
+    const char *name = names[mode];
     heap_mark_t before = heap_mark();
+    ESP_LOGI(TAG, "%s capture start", name);
     log_heap("raw capture start");
     esp_err_t err = camera_up();
     if (err != ESP_OK) {
@@ -465,13 +528,39 @@ esp_err_t cores3_camera_capture_raw(uint8_t **data, size_t *len, int *width, int
     }
     uint8_t *copy = NULL;
     stream_t s;
-    err = stream_open(&s, false);
+    memset(&s, 0, sizeof(s));
+    s.fd = -1;
+    bool pattern_on = false;
+    if (mode == CORES3_RAW_RGB565) {
+        /* The fd must be open to switch the sensor format; S_FMT comes after, so open it here. */
+        int fd = open(BSP_CAMERA_DEVICE, O_RDONLY);
+        if (fd < 0) {
+            ESP_LOGE(TAG, "open %s failed", BSP_CAMERA_DEVICE);
+            err = ESP_FAIL;
+        } else {
+            err = sensor_to_rgb565(fd);
+            close(fd);   /* the sensor keeps the format; stream_open reopens the node and asks for RGB565X */
+        }
+    }
+    if (err == ESP_OK) {
+        err = mode == CORES3_RAW_RGB565 ? stream_open(&s, false, V4L2_PIX_FMT_RGB565X, false)
+                                        : stream_open(&s, false, V4L2_PIX_FMT_YUYV, true);
+    }
+    if (err == ESP_OK && mode == CORES3_RAW_TESTBAR) {
+        int r = gc_update_reg(0x2e, 0x01, 0x01);   /* test pattern on; stream_grab drops CAM_SETTLE_FRAMES first */
+        pattern_on = r >= 0;
+        ESP_LOGI(TAG, "testbar: test pattern %s (reg 0x2e = 0x%02x)", pattern_on ? "enabled" : "FAILED to enable",
+                 r < 0 ? 0 : r);
+        if (!pattern_on) {
+            err = ESP_FAIL;
+        }
+    }
     if (err == ESP_OK) {
         const uint8_t *frame = NULL;
         size_t frame_len = 0;
         err = stream_grab(&s, &frame, &frame_len);
         if (err == ESP_OK) {
-            ESP_LOGI(TAG, "raw frame: %u bytes (expected %u), unconverted", (unsigned)frame_len,
+            ESP_LOGI(TAG, "%s frame: %u bytes (expected %u), unconverted", name, (unsigned)frame_len,
                      (unsigned)CAM_FRAME_BYTES);
             copy = heap_caps_malloc(frame_len, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
             if (!copy) {
@@ -486,14 +575,33 @@ esp_err_t cores3_camera_capture_raw(uint8_t **data, size_t *len, int *width, int
             }
         }
     }
+    if (pattern_on) {
+        int r = gc_update_reg(0x2e, 0x01, 0x00);
+        ESP_LOGI(TAG, "testbar: test pattern %s (reg 0x2e = 0x%02x)", r >= 0 && !(r & 1) ? "restored" : "RESTORE FAILED",
+                 r < 0 ? 0 : r);
+    }
+    if (mode == CORES3_RAW_RGB565 && s.fd >= 0) {
+        /* Back to the YUV422 table's output format before the sensor is powered off. */
+        if (ioctl(s.fd, VIDIOC_S_SENSOR_FMT, &s_yuyv_fmt) == 0) {
+            ESP_LOGI(TAG, "raw565: sensor format restored to YUYV");
+        } else {
+            ESP_LOGW(TAG, "raw565: could not restore YUYV (the next capture re-initialises the sensor anyway)");
+        }
+    }
     stream_close(&s);
     camera_down();
     if (err != ESP_OK) {
         free(copy);
     }
+    ESP_LOGI(TAG, "%s capture %s", name, err == ESP_OK ? "ok" : "FAILED");
     log_heap("raw capture done, camera off");
     log_heap_delta(&before);
     return err;
+}
+
+esp_err_t cores3_camera_capture_raw(uint8_t **data, size_t *len, int *width, int *height, uint32_t *fourcc)
+{
+    return cores3_camera_capture_raw_mode(CORES3_RAW_NORMAL, data, len, width, height, fourcc);
 }
 
 static void cam_release(camera_frame_t *frame)

@@ -1625,6 +1625,18 @@ static char *build_register_json(void) {
                 nullptr, nullptr);
     cJSON_AddNumberToObject(
         cJSON_GetObjectItem(commands, "camera.raw"), "timeout_ms", 20000);
+    add_command(commands, "camera.testbar",
+                "Diagnostic: like camera.raw but with the GC0308 test pattern (reg 0x2e bit 0) "
+                "on for the frame, then off again. Same reply and busy rules as camera.raw.",
+                nullptr, nullptr);
+    cJSON_AddNumberToObject(
+        cJSON_GetObjectItem(commands, "camera.testbar"), "timeout_ms", 20000);
+    add_command(commands, "camera.raw565",
+                "Diagnostic: like camera.raw but with the sensor switched to RGB565 (153600 "
+                "bytes) for the frame, then back to YUV422. Same reply and busy rules as camera.raw.",
+                nullptr, nullptr);
+    cJSON_AddNumberToObject(
+        cJSON_GetObjectItem(commands, "camera.raw565"), "timeout_ms", 20000);
     // Local extension of this fork: the StackChan neck servos (muse_servo.c).
     {
         cJSON *move_required = cJSON_CreateObject();
