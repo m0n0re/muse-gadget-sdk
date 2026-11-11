@@ -25,11 +25,17 @@ bool muse_led_available(void);
 /* Manual colour for all 12: r/g/b 0..255, brightness 0..100 (%, 100 = the hardware cap). */
 bool muse_led_set(int r, int g, int b, int brightness);
 bool muse_led_off(void);
+/* Diagnostic: cycles pin/LED_CFG hypotheses, all 12 white for 4 s each (about 24 s, async).
+ * False if already running or unavailable. While it runs, set/off return false (busy). */
+bool muse_led_diag(void);
+bool muse_led_busy(void);
 #else
 static inline void muse_led_start(void) {}
 static inline bool muse_led_available(void) { return false; }
 static inline bool muse_led_set(int r, int g, int b, int brightness) { return false; }
 static inline bool muse_led_off(void) { return false; }
+static inline bool muse_led_diag(void) { return false; }
+static inline bool muse_led_busy(void) { return false; }
 #endif
 
 #ifdef __cplusplus

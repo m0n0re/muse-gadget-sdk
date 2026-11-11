@@ -1668,6 +1668,10 @@ static char *build_register_json(void) {
                     "when the LEDs go back to following it.",
                     led_required, led_optional);
         add_command(commands, "led.off", "Turn the base LEDs off.", nullptr, nullptr);
+        add_command(commands, "led.diag",
+                    "Diagnostic: cycles LED pin / config hypotheses (steps A-F, "
+                    "4 s each, all 12 white) and logs each step name.",
+                    nullptr, nullptr);
     }
 #endif
 

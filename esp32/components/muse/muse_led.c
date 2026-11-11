@@ -49,6 +49,9 @@ static SemaphoreHandle_t s_mu;
 static volatile bool s_ok;
 static bool s_manual;               /* guarded by s_mu */
 static int s_cur[3] = { -1, -1, -1 };   /* last colour written (after scaling), guarded by s_mu */
+static int s_man[4];                /* last manual r,g,b,brightness, guarded by s_mu */
+static bool s_redraw;               /* re-apply the mode colour on the next poll, guarded by s_mu */
+static volatile bool s_diag;        /* led.diag running: every other led command is busy */
 
 static uint16_t rgb565(int r, int g, int b)
 {
@@ -99,6 +102,104 @@ static bool mode_color(muse_mode_t m, mode_color_t *c)
     default:                  return false;   /* OFF: dark */
     }
 }
+
+/* ---- led.diag: cycle the open hypotheses and light all 12 white at each, 4 s apiece ---- */
+
+#define DIAG_STEP_MS 4000
+
+typedef struct { const char *name; uint16_t pin; uint8_t cfg; bool toggle; } diag_step_t;
+
+static const diag_step_t DIAG_STEPS[] = {
+    { "A", 0x2000, LED_COUNT, false },
+    { "B", 0x2000, LED_COUNT | LED_CFG_REFRESH, false },
+    { "C", 0x4000, LED_COUNT, false },
+    { "D", 0x4000, LED_COUNT | LED_CFG_REFRESH, false },
+    /* Extras: refresh bit then straight back to 0x0c, in case the bit is a self-clearing strobe. */
+    { "E", 0x2000, LED_COUNT | LED_CFG_REFRESH, true },
+    { "F", 0x4000, LED_COUNT | LED_CFG_REFRESH, true },
+};
+
+static esp_err_t diag_pin(uint16_t bit)
+{
+    esp_err_t e = muse_ioe_update16(REG_OD, bit, 0);
+    if (e == ESP_OK) e = muse_ioe_update16(REG_OUT, bit, bit);
+    if (e == ESP_OK) e = muse_ioe_update16(REG_MODE, bit, bit);
+    return e;
+}
+
+static void diag_task(void *arg)
+{
+    (void)arg;
+    /* Level that every step shows: white at the hardware cap, same scaling as led.set 100 %. */
+    int v = (int)lroundf(255 * HW_CAP);
+    uint8_t ram[LED_COUNT * 2];
+    uint16_t c = rgb565(v, v, v);
+    for (int i = 0; i < LED_COUNT; i++) { ram[2 * i] = (uint8_t)c; ram[2 * i + 1] = (uint8_t)(c >> 8); }
+
+    /* Remember the state of the alternative pin (bit 14) to put it back afterwards. */
+    uint8_t m0[2] = {0}, o0[2] = {0}, d0[2] = {0};
+    bool saved = muse_ioe_read(REG_MODE, m0, 2) == ESP_OK && muse_ioe_read(REG_OUT, o0, 2) == ESP_OK &&
+                 muse_ioe_read(REG_OD, d0, 2) == ESP_OK;
+    ESP_LOGI(TAG, "led.diag start: white %d,%d,%d (rgb565 0x%04x), %d ms per step; steps A..F", v, v, v, c,
+             DIAG_STEP_MS);
+    for (size_t i = 0; i < sizeof(DIAG_STEPS) / sizeof(DIAG_STEPS[0]); i++) {
+        const diag_step_t *st = &DIAG_STEPS[i];
+        /* Data pin: configure the one under test (the other keeps whatever state it has). */
+        esp_err_t e = diag_pin(st->pin);
+        if (e == ESP_OK) e = muse_ioe_write(REG_LED_RAM, ram, sizeof(ram));
+        uint8_t cfg = st->cfg;
+        if (e == ESP_OK) e = muse_ioe_write(REG_LED_CFG, &cfg, 1);
+        ESP_LOGI(TAG, "led.diag step %s: pin=%d cfg=0x%02x%s -> %s", st->name, st->pin == 0x2000 ? 13 : 14, st->cfg,
+                 st->toggle ? " (refresh then back to 0x0c after 50 ms)" : "", esp_err_to_name(e));
+        if (st->toggle && e == ESP_OK) {
+            vTaskDelay(pdMS_TO_TICKS(50));
+            uint8_t back = LED_COUNT;
+            e = muse_ioe_write(REG_LED_CFG, &back, 1);
+            ESP_LOGI(TAG, "led.diag step %s: cfg toggled back to 0x%02x -> %s", st->name, back, esp_err_to_name(e));
+        }
+        vTaskDelay(pdMS_TO_TICKS(DIAG_STEP_MS));
+        ESP_LOGI(TAG, "led.diag step %s end", st->name);
+    }
+    /* Restore: bit 14 as it was, data pin back on bit 13, count only, then the old display. */
+    if (saved) {
+        uint16_t b = 0x4000;
+        uint16_t mo = (uint16_t)(m0[0] | (m0[1] << 8)), oo = (uint16_t)(o0[0] | (o0[1] << 8)),
+                 dd = (uint16_t)(d0[0] | (d0[1] << 8));
+        if ((mo & b) == 0) muse_ioe_update16(REG_MODE, b, 0);
+        muse_ioe_update16(REG_OUT, b, oo & b);
+        muse_ioe_update16(REG_OD, b, dd & b);
+    }
+    diag_pin(LED_PIN_BIT);
+    uint8_t cfg = LED_COUNT;
+    muse_ioe_write(REG_LED_CFG, &cfg, 1);
+    xSemaphoreTake(s_mu, portMAX_DELAY);
+    s_cur[0] = s_cur[1] = s_cur[2] = -1;
+    if (s_manual) show_locked(s_man[0], s_man[1], s_man[2], s_man[3] / 100.0f, "diag-restore manual");
+    else s_redraw = true;
+    s_diag = false;
+    xSemaphoreGive(s_mu);
+    ESP_LOGI(TAG, "led.diag done: pin bit 13 / cfg 0x%02x restored, display %s", cfg,
+             s_manual ? "back to the manual colour" : "back to following the mode");
+    vTaskDelete(NULL);
+}
+
+bool muse_led_diag(void)
+{
+    if (!s_ok) return false;
+    xSemaphoreTake(s_mu, portMAX_DELAY);
+    bool busy = s_diag;
+    s_diag = true;
+    xSemaphoreGive(s_mu);
+    if (busy) return false;
+    TaskHandle_t t;
+    if (xTaskCreateWithCaps(diag_task, "led_diag", 4096, NULL, 3, &t, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS) {
+        s_diag = false;
+        return false;
+    }
+    return true;
+}
+
+bool muse_led_busy(void) { return s_diag; }
 
 static void led_task(void *arg)
 {
@@ -160,11 +261,17 @@ static void led_task(void *arg)
         vTaskDelay(pdMS_TO_TICKS(last == MUSE_MODE_SPEAKING ? BREATH_STEP_MS : POLL_MS));
         muse_mode_t m = muse_state_mode(&secs);
         xSemaphoreTake(s_mu, portMAX_DELAY);
-        if (m != last) {
+        if (s_diag) {
+            /* led.diag owns the strip */
+        } else if (m != last) {
             if (s_manual) ESP_LOGI(TAG, "mode %d: manual colour released", m);
             s_manual = false;
             last = m;
             breath_ms = 0;
+            if (mode_color(m, &c)) show_locked(c.r, c.g, c.b, c.scale, c.name);
+            else write_color_locked(0, 0, 0, "off");
+        } else if (s_redraw) {
+            s_redraw = false;
             if (mode_color(m, &c)) show_locked(c.r, c.g, c.b, c.scale, c.name);
             else write_color_locked(0, 0, 0, "off");
         } else if (!s_manual && m == MUSE_MODE_SPEAKING && mode_color(m, &c)) {
@@ -189,13 +296,15 @@ bool muse_led_available(void) { return s_ok; }
 
 bool muse_led_set(int r, int g, int b, int brightness)
 {
-    if (!s_ok) return false;
+    if (!s_ok || s_diag) return false;
     r = r < 0 ? 0 : r > 255 ? 255 : r;
     g = g < 0 ? 0 : g > 255 ? 255 : g;
     b = b < 0 ? 0 : b > 255 ? 255 : b;
     brightness = brightness < 0 ? 0 : brightness > 100 ? 100 : brightness;
     xSemaphoreTake(s_mu, portMAX_DELAY);
+    if (s_diag) { xSemaphoreGive(s_mu); return false; }
     s_manual = true;
+    s_man[0] = r; s_man[1] = g; s_man[2] = b; s_man[3] = brightness;
     ESP_LOGI(TAG, "led.set r=%d g=%d b=%d brightness=%d%%", r, g, b, brightness);
     bool ok = show_locked(r, g, b, brightness / 100.0f, "manual");
     xSemaphoreGive(s_mu);
@@ -204,9 +313,11 @@ bool muse_led_set(int r, int g, int b, int brightness)
 
 bool muse_led_off(void)
 {
-    if (!s_ok) return false;
+    if (!s_ok || s_diag) return false;
     xSemaphoreTake(s_mu, portMAX_DELAY);
+    if (s_diag) { xSemaphoreGive(s_mu); return false; }
     s_manual = true;
+    s_man[0] = s_man[1] = s_man[2] = s_man[3] = 0;
     bool ok = write_color_locked(0, 0, 0, "manual off");
     xSemaphoreGive(s_mu);
     return ok;

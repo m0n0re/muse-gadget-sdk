@@ -2107,6 +2107,7 @@ static cJSON *on_ws_command(
         }
         if (jbr && !cJSON_IsNumber(jbr)) return command_error("invalid_params", "brightness must be a number 0-100");
         if (!muse_led_available()) return command_error("unavailable", "the base LEDs are not available");
+        if (muse_led_busy()) return command_error("busy", "led.diag is running");
         if (!muse_led_set((int)jr->valuedouble, (int)jg->valuedouble, (int)jb->valuedouble,
                           jbr ? (int)jbr->valuedouble : 100)) {
             return command_error("failed", "writing the LEDs failed");
@@ -2117,9 +2118,18 @@ static cJSON *on_ws_command(
     }
     if (strcmp(command, "led.off") == 0) {
         if (!muse_led_available()) return command_error("unavailable", "the base LEDs are not available");
+        if (muse_led_busy()) return command_error("busy", "led.diag is running");
         if (!muse_led_off()) return command_error("failed", "writing the LEDs failed");
         cJSON *result = cJSON_CreateObject();
         cJSON_AddBoolToObject(result, "ok", true);
+        return result;
+    }
+    if (strcmp(command, "led.diag") == 0) {
+        if (!muse_led_available()) return command_error("unavailable", "the base LEDs are not available");
+        if (!muse_led_diag()) return command_error("busy", "led.diag is already running");
+        cJSON *result = cJSON_CreateObject();
+        cJSON_AddBoolToObject(result, "ok", true);
+        cJSON_AddStringToObject(result, "note", "steps A-F, 4 s each, watch the log and the base LEDs");
         return result;
     }
     if (strcmp(command, "head.state") == 0) {
