@@ -64,6 +64,12 @@ CONFIG_MUSE_TTS_ENDPOINT="http://192.168.24.52:50022/say"
 # camera.look: GC0308 320x240 YUYV through esp_video (DVP), JPEG-encoded and POSTed to
 # CONFIG_MUSE_CAMERA_ENDPOINT (its default is this URL; set here so the profile says so).
 CONFIG_MUSE_CAMERA_ENDPOINT="http://192.168.24.52:50023/capture"
+# esp_cam_sensor's extended DVP driver (CAM_CTRL_DVP_ENABLE, default y) takes a 32 KB DMA
+# bounce buffer from INTERNAL RAM, which the resident wake word leaves no room for (largest
+# free block ~4.8 KB: "no mem for CAM DVP DMA receive buffer"). Off, esp_video falls back to
+# ESP-IDF's own esp_driver_cam DVP driver, whose backup buffer and DMA target are PSRAM
+# (MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA when CONFIG_SPIRAM).
+# CONFIG_CAM_CTRL_DVP_ENABLE is not set
 CONFIG_CAMERA_GC0308=y
 CONFIG_CAMERA_GC0308_DVP_YUV422_YUYV_320X240_20FPS=y
 CONFIG_CAMERA_GC0308_DVP_DEFAULT_FMT_YUV422_YUYV_320X240_20FPS=y

@@ -37,6 +37,7 @@
 
 #include "bsp/esp-bsp.h"
 #include "esp_heap_caps.h"
+#include "esp_memory_utils.h"
 #include "esp_jpeg_enc.h"
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -51,12 +52,23 @@
 #define CAM_H 240
 #define CAM_XCLK_GPIO GPIO_NUM_2
 #define CAM_BUFS 2
+#define CAM_FRAME_BYTES (CAM_W * CAM_H * 2)   /* YUYV: 2 bytes per pixel */
 #define CAM_SETTLE_FRAMES 8      /* frames dropped first, for auto exposure and white balance */
 #define CAM_FRAME_TIMEOUT_S 2
 #define JPEG_QUALITY 80
 #define JPEG_OUT_MAX (96 * 1024) /* 320x240 at quality 80 is about 10-20 KB */
 
 static const char *TAG = "cores3_cam";
+
+typedef struct {
+    size_t internal_free, psram_free;
+} heap_mark_t;
+
+static heap_mark_t heap_mark(void)
+{
+    heap_mark_t m = { heap_caps_get_free_size(MALLOC_CAP_INTERNAL), heap_caps_get_free_size(MALLOC_CAP_SPIRAM) };
+    return m;
+}
 
 static void log_heap(const char *when)
 {
@@ -65,6 +77,19 @@ static void log_heap(const char *when)
              (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
              (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM));
+}
+
+/* After a capture everything taken for it must be back: a drop is a leak. */
+static void log_heap_delta(const heap_mark_t *before)
+{
+    heap_mark_t now = heap_mark();
+    long di = (long)now.internal_free - (long)before->internal_free;
+    long dp = (long)now.psram_free - (long)before->psram_free;
+    if (di < -256 || dp < -256) {
+        ESP_LOGW(TAG, "LEAK? free after vs before the capture: internal %+ld, psram %+ld bytes", di, dp);
+    } else {
+        ESP_LOGI(TAG, "free after vs before the capture: internal %+ld, psram %+ld bytes (restored)", di, dp);
+    }
 }
 
 static esp_err_t camera_up(void)
@@ -159,10 +184,20 @@ static esp_err_t stream_open(stream_t *s)
         return ESP_FAIL;
     }
     if (ioctl(s->fd, VIDIOC_G_FMT, &fmt) == 0) {
-        ESP_LOGI(TAG, "format %ux%u, %u bytes/frame", (unsigned)fmt.fmt.pix.width,
-                 (unsigned)fmt.fmt.pix.height, (unsigned)fmt.fmt.pix.sizeimage);
+        /* esp_video's G_FMT leaves sizeimage at 0 (the buffer size lives in the stream's
+         * buf info); the real frame size is the buffer length QUERYBUF reports below. */
+        const uint32_t pf = fmt.fmt.pix.pixelformat;
+        ESP_LOGI(TAG, "format %ux%u, pixelformat '%c%c%c%c' (%s), expected %u bytes/frame (sizeimage field %u)",
+                 (unsigned)fmt.fmt.pix.width, (unsigned)fmt.fmt.pix.height, (char)(pf & 0xff),
+                 (char)((pf >> 8) & 0xff), (char)((pf >> 16) & 0xff), (char)((pf >> 24) & 0xff),
+                 pf == V4L2_PIX_FMT_YUYV ? "YUYV" : "NOT YUYV", (unsigned)CAM_FRAME_BYTES,
+                 (unsigned)fmt.fmt.pix.sizeimage);
         if (fmt.fmt.pix.width != CAM_W || fmt.fmt.pix.height != CAM_H) {
             ESP_LOGE(TAG, "sensor is not at %dx%d", CAM_W, CAM_H);
+            return ESP_FAIL;
+        }
+        if (pf != V4L2_PIX_FMT_YUYV) {
+            ESP_LOGE(TAG, "pixel format is not YUYV; the JPEG encoder is set up for YUYV");
             return ESP_FAIL;
         }
     }
@@ -193,6 +228,13 @@ static esp_err_t stream_open(stream_t *s)
             return ESP_FAIL;
         }
         s->map_len[i] = buf.length;
+        if (buf.length < CAM_FRAME_BYTES) {
+            ESP_LOGE(TAG, "buffer %d is %u bytes, a frame needs %u", i, (unsigned)buf.length,
+                     (unsigned)CAM_FRAME_BYTES);
+            return ESP_FAIL;
+        }
+        ESP_LOGI(TAG, "buffer %d: %u bytes at %p (%s)", i, (unsigned)buf.length, s->map[i],
+                 esp_ptr_external_ram(s->map[i]) ? "PSRAM" : "internal");
         if (ioctl(s->fd, VIDIOC_QBUF, &buf) != 0) {
             ESP_LOGE(TAG, "QBUF failed");
             return ESP_FAIL;
@@ -237,9 +279,13 @@ static esp_err_t cam_init(void)
     return ESP_OK;
 }
 
+static heap_mark_t s_before;   /* one capture at a time (muse_look's s_active) */
+
 static esp_err_t cam_capture(camera_frame_t *out)
 {
     int64_t t0 = esp_timer_get_time();
+    s_before = heap_mark();
+    const heap_mark_t *before = &s_before;
     log_heap("capture start");
     esp_err_t err = camera_up();
     if (err != ESP_OK) {
@@ -253,7 +299,10 @@ static esp_err_t cam_capture(camera_frame_t *out)
         const uint8_t *yuv = NULL;
         size_t yuv_len = 0;
         err = stream_grab(&s, &yuv, &yuv_len);
-        if (err == ESP_OK && yuv_len < (size_t)CAM_W * CAM_H * 2) {
+        if (err == ESP_OK) {
+            ESP_LOGI(TAG, "frame: %u bytes (expected %u)", (unsigned)yuv_len, (unsigned)CAM_FRAME_BYTES);
+        }
+        if (err == ESP_OK && yuv_len < (size_t)CAM_FRAME_BYTES) {
             ESP_LOGE(TAG, "short frame: %u bytes", (unsigned)yuv_len);
             err = ESP_ERR_INVALID_SIZE;
         }
@@ -290,9 +339,11 @@ static esp_err_t cam_capture(camera_frame_t *out)
     camera_down();
     if (err != ESP_OK) {
         free(jpg);
+        log_heap("capture failed, camera off");
+        log_heap_delta(before);
         return err;
     }
-    log_heap("capture done, camera off");
+    log_heap("capture done, camera off (JPEG still held)");
     ESP_LOGI(TAG, "captured %ux%u JPEG, %u bytes, %d ms", (unsigned)out->width, (unsigned)out->height,
              (unsigned)out->len, (int)((esp_timer_get_time() - t0) / 1000));
     return ESP_OK;
@@ -301,6 +352,8 @@ static esp_err_t cam_capture(camera_frame_t *out)
 static void cam_release(camera_frame_t *frame)
 {
     free(frame->priv);
+    log_heap("frame released");
+    log_heap_delta(&s_before);
 }
 
 static const camera_driver_t s_driver = {

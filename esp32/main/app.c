@@ -1728,16 +1728,24 @@ static void look_done(void *user, bool ok, const char *code, const char *message
     look_ctx_t *ctx = user;
     cJSON *result = cJSON_CreateObject();
     cJSON_AddBoolToObject(result, "ok", ok);
+    // Only ok, payload and error.message reach Muse (wrap_result_json): fields
+    // beside them are dropped, so the picture's details go in payload.
     if (ok) {
-        cJSON_AddStringToObject(result, "file", file);
-        cJSON_AddNumberToObject(result, "bytes", (double)bytes);
-        cJSON_AddNumberToObject(result, "width", 320);
-        cJSON_AddNumberToObject(result, "height", 240);
+        cJSON *payload = cJSON_AddObjectToObject(result, "payload");
+        cJSON_AddStringToObject(payload, "file", file);
+        cJSON_AddNumberToObject(payload, "bytes", (double)bytes);
+        cJSON_AddNumberToObject(payload, "width", 320);
+        cJSON_AddNumberToObject(payload, "height", 240);
     } else {
         cJSON *error = cJSON_AddObjectToObject(result, "error");
         cJSON_AddStringToObject(error, "code", code ? code : "look_failed");
         cJSON_AddStringToObject(error, "message", message ? message : "camera.look failed");
     }
+    // The session task sends a small result only while total free DMA RAM is >= 6 KiB
+    // (NOISE_TX_SMALL_FRAME_BYTES); log it so a reply that never arrives can be told apart.
+    ESP_LOGI(TAG, "camera.look reply queued: ok=%d (free DMA %u, internal %u)", ok,
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_DMA),
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
     noise_ctrl_send_command_result(ctx->session_generation, ctx->request_id, result);
     free(ctx);
 }
