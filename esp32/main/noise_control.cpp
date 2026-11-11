@@ -1601,6 +1601,54 @@ static char *build_register_json(void) {
         cJSON_GetObjectItem(commands, "voice.speak"), "timeout_ms", 40000);
 #endif
 
+#if CONFIG_MUSE_BOARD_M5STACK_CORES3
+    // Local extension of this fork: the StackChan neck servos (muse_servo.c).
+    {
+        cJSON *move_required = cJSON_CreateObject();
+        cJSON *yaw_param = cJSON_CreateObject();
+        cJSON_AddStringToObject(yaw_param, "type", "number");
+        cJSON_AddStringToObject(yaw_param, "description",
+                                "Left/right angle in degrees, -120 to 120 (0 = ahead).");
+        cJSON_AddItemToObject(move_required, "yaw", yaw_param);
+        cJSON *pitch_param = cJSON_CreateObject();
+        cJSON_AddStringToObject(pitch_param, "type", "number");
+        cJSON_AddStringToObject(pitch_param, "description",
+                                "Up/down angle in degrees, 5 to 85 (45 = neutral).");
+        cJSON_AddItemToObject(move_required, "pitch", pitch_param);
+        cJSON *move_optional = cJSON_CreateObject();
+        cJSON *ms_param = cJSON_CreateObject();
+        cJSON_AddStringToObject(ms_param, "type", "integer");
+        cJSON_AddStringToObject(ms_param, "description",
+                                "Rough time the move should take, in ms; "
+                                "never faster than the speed limit.");
+        cJSON_AddItemToObject(move_optional, "ms", ms_param);
+        add_command(commands, "head.move",
+                    "Turn the head to the given yaw and pitch (clamped to the "
+                    "safe range; the reply says if it was). Replies when the "
+                    "head has arrived. Fails with \"busy\" during a "
+                    "conversation, call or speech, or while the head moves.",
+                    move_required, move_optional);
+        cJSON_AddNumberToObject(
+            cJSON_GetObjectItem(commands, "head.move"), "timeout_ms", 20000);
+
+        cJSON *gesture_required = cJSON_CreateObject();
+        cJSON_AddItemToObject(gesture_required, "name",
+                              string_param("nod, shake, look_up or center."));
+        add_command(commands, "head.gesture",
+                    "Make a head gesture: nod, shake, look_up, or center "
+                    "(back to neutral). Replies when it has finished. Fails "
+                    "with \"busy\" like head.move.",
+                    gesture_required, nullptr);
+        cJSON_AddNumberToObject(
+            cJSON_GetObjectItem(commands, "head.gesture"), "timeout_ms", 20000);
+
+        add_command(commands, "head.state",
+                    "The head's current yaw and pitch in degrees and whether "
+                    "the servo supply (VM EN) is on.",
+                    nullptr, nullptr);
+    }
+#endif
+
 #if CONFIG_HOMEHUB_SENSECAP_SENSORS
     add_command(commands, "sensors.read",
                 "Read the air sensors: CO2 in ppm, the tVOC index (1-500, 100 "

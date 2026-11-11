@@ -2934,6 +2934,11 @@ extern "C" bool muse_hatch_speak(const char *text, muse_hatch_speak_cb cb, void 
     return true;
 }
 
+extern "C" bool muse_hatch_busy(void)
+{
+    return s_turn.phase != P_IDLE || call_busy() || s_speak_state.load() != SPEAK_IDLE || s_incoming.load();
+}
+
 extern "C" bool muse_hatch_incoming(void)
 {
     s_incoming_used = true;

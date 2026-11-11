@@ -144,6 +144,9 @@ size_t muse_hatch_turn_read(int16_t *pcm, size_t frames, int wait_ms);
 typedef void (*muse_hatch_speak_cb)(void *ctx, bool ok, const char *code, const char *message);
 bool muse_hatch_speak(const char *text, muse_hatch_speak_cb cb, void *ctx, const char **code, const char **message);
 
+/* True while a chat turn, call, speak request or held reply is active (the head servos stay still then). */
+bool muse_hatch_busy(void);
+
 /* Bench test: decodes a built-in MP3 to 16 kHz; caller frees *pcm. Returns frames. */
 size_t muse_hatch_mp3_selftest(int16_t **pcm);
 

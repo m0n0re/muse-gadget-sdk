@@ -37,6 +37,7 @@
 #include "muse_mem.h"
 #include "muse_settings.h"
 #include "muse_state.h"
+#include "muse_servo.h"
 #include "muse_wake.h"
 #include "muse_wifi.h"
 #if CONFIG_MUSE_REALTIME_VOICE
@@ -1377,6 +1378,7 @@ static void voice_task(void *arg)
                  * now; record() ends it on silence. Not the call a tap starts. */
                 if (!muse_wake_take() || atomic_load(&s_shutdown)) continue;
                 ESP_LOGI(TAG, "wake word: starting a voice note");
+                muse_servo_listen_pose();   /* a small lift of the head; non-blocking, a no-op off the CoreS3 */
                 muse_state_set_asleep(false);
                 muse_state_poke();
                 s_press_input_epoch = muse_input_call_epoch();

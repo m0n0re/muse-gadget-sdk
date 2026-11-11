@@ -39,6 +39,11 @@
 #include "esp_ota_ops.h"
 #include "esp_partition.h"
 #include "esp_efuse.h"
+#include <math.h>
+#if CONFIG_MUSE_BOARD_M5STACK_CORES3
+#include "muse_servo.h"
+#include "muse_state.h"
+#endif
 
 #include "lwip/ip4_addr.h"
 
@@ -1709,6 +1714,44 @@ static void speak_done(void *user, bool ok, const char *code, const char *messag
 }
 #endif
 
+#if CONFIG_MUSE_BOARD_M5STACK_CORES3
+// head.move / head.gesture / head.state: local extensions of this fork.
+typedef struct {
+    noise_ctrl_session_generation_t session_generation;
+    char request_id[64];
+    bool clamped;
+    float yaw, pitch;
+} head_ctx_t;
+
+static void head_done(void *user, bool ok, const char *code, const char *message) {
+    head_ctx_t *ctx = user;
+    cJSON *result = cJSON_CreateObject();
+    cJSON_AddBoolToObject(result, "ok", ok);
+    if (ok) {
+        if (ctx->clamped) {
+            cJSON_AddBoolToObject(result, "clamped", true);
+            cJSON_AddNumberToObject(result, "yaw", ctx->yaw);
+            cJSON_AddNumberToObject(result, "pitch", ctx->pitch);
+        }
+    } else {
+        cJSON *error = cJSON_AddObjectToObject(result, "error");
+        cJSON_AddStringToObject(error, "code", code ? code : "head_failed");
+        cJSON_AddStringToObject(error, "message", message ? message : "head command failed");
+    }
+    noise_ctrl_send_command_result(ctx->session_generation, ctx->request_id, result);
+    free(ctx);
+}
+
+// A conversation, call, speech or recording is in progress (same rule as voice.speak).
+static bool head_voice_busy(void) {
+#if CONFIG_MUSE_HATCH
+    if (muse_hatch_busy()) return true;
+#endif
+    muse_mode_t mode = muse_state_mode(NULL);
+    return mode != MUSE_MODE_IDLE;
+}
+#endif
+
 // ---- WebSocket command callbacks -------------------------------------------
 
 typedef enum {
@@ -2044,6 +2087,76 @@ static cJSON *on_ws_command(
         strncpy(ctx->request_id, request_id, sizeof(ctx->request_id) - 1);
         const char *code, *message;
         if (!muse_hatch_speak(text->valuestring, speak_done, ctx, &code, &message)) {
+            free(ctx);
+            return command_error(code, message);
+        }
+        cJSON *async = cJSON_CreateObject();
+        cJSON_AddBoolToObject(async, "_async", true);
+        return async;
+    }
+#endif
+#if CONFIG_MUSE_BOARD_M5STACK_CORES3
+    if (strcmp(command, "head.state") == 0) {
+        muse_servo_state_t st;
+        muse_servo_get_state(&st);
+        cJSON *result = cJSON_CreateObject();
+        cJSON_AddBoolToObject(result, "ok", true);
+        cJSON_AddBoolToObject(result, "available", st.available);
+        cJSON_AddNumberToObject(result, "yaw", st.yaw);
+        cJSON_AddNumberToObject(result, "pitch", st.pitch);
+        cJSON_AddBoolToObject(result, "vm_en", st.vm_en);
+        cJSON_AddBoolToObject(result, "position_known", st.pos_valid);
+        cJSON_AddBoolToObject(result, "moving", st.moving);
+        ESP_LOGI(TAG, "head.state: yaw %.1f pitch %.1f vm_en %d valid %d", st.yaw, st.pitch, st.vm_en, st.pos_valid);
+        return result;
+    }
+    if (strcmp(command, "head.move") == 0 || strcmp(command, "head.gesture") == 0) {
+        bool is_move = strcmp(command, "head.move") == 0;
+        float yaw = 0, pitch = 0;
+        int ms = 0;
+        muse_gesture_t gesture = MUSE_GESTURE_CENTER;
+        if (is_move) {
+            cJSON *jy = cJSON_GetObjectItem(params, "yaw");
+            cJSON *jp = cJSON_GetObjectItem(params, "pitch");
+            cJSON *jm = cJSON_GetObjectItem(params, "ms");
+            if (!cJSON_IsNumber(jy) || !cJSON_IsNumber(jp)) {
+                return command_error("missing_param", "yaw and pitch (numbers) are required");
+            }
+            yaw = (float)jy->valuedouble;
+            pitch = (float)jp->valuedouble;
+            if (cJSON_IsNumber(jm)) ms = (int)jm->valuedouble;
+        } else {
+            cJSON *name = cJSON_GetObjectItem(params, "name");
+            if (!cJSON_IsString(name) || !name->valuestring) {
+                return command_error("missing_param", "name is required");
+            }
+            if (strcmp(name->valuestring, "nod") == 0) gesture = MUSE_GESTURE_NOD;
+            else if (strcmp(name->valuestring, "shake") == 0) gesture = MUSE_GESTURE_SHAKE;
+            else if (strcmp(name->valuestring, "look_up") == 0) gesture = MUSE_GESTURE_LOOK_UP;
+            else if (strcmp(name->valuestring, "center") == 0) gesture = MUSE_GESTURE_CENTER;
+            else return command_error("invalid_params", "name must be nod, shake, look_up or center");
+        }
+        if (head_voice_busy()) {
+            ESP_LOGW(TAG, "%s refused: a conversation, call or speech is active", command);
+            return command_error("busy", "a conversation, call or speech is in progress");
+        }
+        head_ctx_t *ctx = calloc(1, sizeof(*ctx));
+        if (!ctx) return command_error("out_of_memory", "failed to allocate");
+        ctx->session_generation = session_generation;
+        strncpy(ctx->request_id, request_id, sizeof(ctx->request_id) - 1);
+        const char *code, *message;
+        bool ok;
+        if (is_move) {
+            // Set before the call: head_done may run (and free ctx) before it returns.
+            ctx->yaw = fminf(fmaxf(yaw, -MUSE_SERVO_YAW_MAX), MUSE_SERVO_YAW_MAX);
+            ctx->pitch = fminf(fmaxf(pitch, MUSE_SERVO_PITCH_MIN), MUSE_SERVO_PITCH_MAX);
+            ctx->clamped = ctx->yaw != yaw || ctx->pitch != pitch;
+            bool unused_clamped;
+            ok = muse_servo_move(yaw, pitch, ms, &unused_clamped, head_done, ctx, &code, &message);
+        } else {
+            ok = muse_servo_gesture(gesture, head_done, ctx, &code, &message);
+        }
+        if (!ok) {
             free(ctx);
             return command_error(code, message);
         }

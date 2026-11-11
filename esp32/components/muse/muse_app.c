@@ -26,6 +26,7 @@
 #include "muse_ble.h"
 #include "muse_chat.h"
 #include "muse_input.h"
+#include "muse_servo.h"
 #include "muse_settings.h"
 #include "muse_state.h"
 #include "muse_text.h"
@@ -72,6 +73,7 @@ void muse_app_run(const muse_board_t *board)
     muse_board = board;
     ESP_LOGI(TAG, "board: %s", board->name);
     ESP_ERROR_CHECK(board->init());
+    muse_servo_start();   /* CoreS3 only: powers the neck servos and moves them to neutral (its own task) */
     ESP_ERROR_CHECK(muse_settings_init());
     muse_settings_set_listener(on_setting);
     muse_state_init();
