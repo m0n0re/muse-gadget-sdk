@@ -306,11 +306,33 @@ bool tunnel_netif_start(const ip4_addr_t *ip,
         tx_item_t *p = &s_tx_slots[i];
         xQueueSend(s_tx_free_queue, &p, 0);
     }
-    if (!s_tx_task
-        && xTaskCreate(tx_task, "tun_tx", TX_TASK_STACK, NULL, TX_TASK_PRIO,
-                       &s_tx_task) != pdPASS) {
-        ESP_LOGE(TAG, "xTaskCreate failed");
-        return false;
+    if (!s_tx_task) {
+        // The stack goes in PSRAM first: with the wake word resident, internal
+        // RAM is ~17 KB and fragmented, so a 4 KB internal stack can fail
+        // (boot log: "xTaskCreate failed"). The task never touches flash, so
+        // an external stack is safe. Internal RAM is the fallback.
+        BaseType_t ok = xTaskCreatePinnedToCoreWithCaps(
+            tx_task, "tun_tx", TX_TASK_STACK, NULL, TX_TASK_PRIO, &s_tx_task,
+            tskNO_AFFINITY, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        const char *where = "PSRAM";
+        if (ok != pdPASS) {
+            s_tx_task = NULL;
+            ESP_LOGW(TAG, "tun_tx stack in PSRAM failed; trying internal (free %u, largest %u)",
+                     (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                     (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+            ok = xTaskCreatePinnedToCoreWithCaps(
+                tx_task, "tun_tx", TX_TASK_STACK, NULL, TX_TASK_PRIO, &s_tx_task,
+                tskNO_AFFINITY, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+            where = "internal";
+        }
+        if (ok != pdPASS) {
+            s_tx_task = NULL;
+            ESP_LOGE(TAG, "xTaskCreate failed (free internal %u, largest %u)",
+                     (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                     (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+            return false;
+        }
+        ESP_LOGI(TAG, "tun_tx task started (stack in %s)", where);
     }
 
     err_t err = netifapi_netif_add(&s_netif, ip, netmask, gw,
