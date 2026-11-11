@@ -103,6 +103,9 @@ static void wake_task(void *arg)
 
 bool muse_wake_start(void)
 {
+    ESP_LOGI(TAG, "start: scheduler state %d (1=not started, 2=running), task \"%s\", core %d, in ISR %d",
+             (int)xTaskGetSchedulerState(), pcTaskGetName(NULL), (int)xPortGetCoreID(), (int)xPortInIsrContext());
+    muse_wake_warmup();   /* no-op if main already did it */
     ESP_LOGI(TAG, "start: free internal %u, psram %u", (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
     ESP_LOGI(TAG, "start: largest internal block %u, heap integrity %s",

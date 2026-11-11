@@ -15,6 +15,7 @@
  */
 
 #include "muse_glue.h"
+#include "muse_wake.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -644,6 +645,10 @@ static void boot_task(void *arg) {
 }
 
 void muse_glue_start(void) {
+    // Wake word: create the C++ runtime's static-init locks and esp-dl's
+    // singleton now, from app_main with the scheduler running and internal RAM
+    // still whole, not later from the voice task.
+    muse_wake_warmup();
     // First, before Link's Wi-Fi, BLE and tunnel and Muse's display take and
     // fragment internal RAM: the CPU's light-sleep retention memory.
     muse_input_power_init();
