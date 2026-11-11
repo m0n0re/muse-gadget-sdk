@@ -102,13 +102,11 @@ typedef struct { int r, g, b; float scale; const char *name; } mode_color_t;
 static bool mode_color(muse_mode_t m, mode_color_t *c)
 {
     switch (m) {
-    case MUSE_MODE_BOOT:
-    case MUSE_MODE_IDLE:      *c = (mode_color_t){ 255, 150, 70, 0.30f, "idle" }; return true;
     case MUSE_MODE_LISTENING: *c = (mode_color_t){ 80, 255, 110, 0.80f, "listening" }; return true;
     case MUSE_MODE_THINKING:  *c = (mode_color_t){ 70, 120, 255, 0.70f, "thinking" }; return true;
     case MUSE_MODE_SPEAKING:  *c = (mode_color_t){ 255, 190, 110, 0.70f, "speaking" }; return true;
     case MUSE_MODE_ERROR:     *c = (mode_color_t){ 255, 20, 20, 0.90f, "error" }; return true;
-    default:                  return false;   /* OFF: dark */
+    default:                  return false;   /* BOOT / IDLE / OFF / sleep: dark */
     }
 }
 
