@@ -891,6 +891,9 @@ static void clear_pending_json_body(pending_json_body &body) {
     body = {};
 }
 
+// Minimum total free DMA heap to send link.register (see send_json_body_chunk).
+static constexpr size_t REGISTER_MIN_DMA_BYTES = 6 * 1024;
+
 enum class json_send_status { Pending, Complete, Failed };
 
 // Send at most one complete BodyChunk per loop turn, yielding to RX, tunnel
@@ -908,9 +911,39 @@ static json_send_status send_json_body_chunk(esp_tls_t *tls, ClientSession &sess
     }
     // Recheck both budgets before EVERY chunk, including retained registration:
     // the queue-boundary sample cannot cover later turns of a paused message.
-    if (!noise_tx_has_dma_headroom(nullptr)
-        || !noise_tx_has_contiguous_dma_headroom()) {
-        return json_send_status::Pending;
+    // link.register is the one message the session cannot do without: raw and
+    // the tunnel only open after its ack. With the wake word resident, total
+    // free DMA sits below the 16 KiB burst margin for good, so gating it on
+    // that margin stalls registration forever (no log, no retry). It is a
+    // single ~3 KB chunk, so for it keep only a small total floor plus the
+    // contiguous AES-descriptor floor. Everything else keeps the full margin.
+    {
+        size_t dma_free = 0;
+        bool total_ok = noise_tx_has_dma_headroom(&dma_free);
+        if (!total_ok && body.is_registration
+            && dma_free >= REGISTER_MIN_DMA_BYTES) {
+            total_ok = true;
+        }
+        bool contig_ok = noise_tx_has_contiguous_dma_headroom();
+        if (!total_ok || !contig_ok) {
+            static uint64_t s_next_wait_log_us = 0;
+            uint64_t now = esp_timer_get_time();
+            if (now >= s_next_wait_log_us) {
+                s_next_wait_log_us = now + 5 * 1000000ULL;
+                ESP_LOGW(TAG, "%s send waiting for DMA headroom: dma free %u (need %u%s), "
+                         "dma largest %u (need 2048); free internal %u, largest %u",
+                         body.is_registration ? "link.register" :
+                         body.is_heartbeat ? "link.heartbeat" : "control message",
+                         (unsigned)dma_free,
+                         (unsigned)(body.is_registration ? REGISTER_MIN_DMA_BYTES
+                                                         : NOISE_TX_DMA_RESERVE_BYTES),
+                         body.is_registration ? " for register" : "",
+                         (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_DMA),
+                         (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                         (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+            }
+            return json_send_status::Pending;
+        }
     }
 
     size_t prefix_len = body.prefix_sent ? 0 : 4;
