@@ -86,6 +86,14 @@ static QueueHandle_t s_queue;
 static uint32_t s_press_input_epoch;
 static uint32_t s_press_mark;   /* the press's pending-call mark (muse_input_clear_call_pending) */
 static int64_t s_press_us;
+/* A note started by the wake word: a "virtual hold" from detection until
+ * silence ends it (record()). No speech soon after the wake cancels it. */
+static bool s_wake_note;
+static bool s_wake_cancel;
+#define WAKE_NOTE_IGNORE_FRAMES (MUSE_AUDIO_RATE * 4 / 10)   /* the wake word's own tail is not speech */
+#define WAKE_NOTE_NO_SPEECH_FRAMES (MUSE_AUDIO_RATE * 4)     /* no speech by now: cancel */
+#define WAKE_NOTE_SILENCE_CHUNKS (1200000 / CHUNK_US)        /* 1.2 s of silence after speech ends it */
+#define WAKE_NOTE_SPEECH_CHUNKS 3                            /* consecutive loud chunks that count as speech */
 static volatile bool s_monitor;
 static volatile float s_monitor_db = -100.0f;
 static volatile bool s_chirp;
@@ -376,6 +384,12 @@ static bool record(char *why, size_t cap)
     take_pre(&st, MUSE_LOW_MEM ? PRE_CHUNKS : s_pre_fill);
     bool released = false;
     size_t stop_at = MAX_FRAMES;
+    /* Wake-started note: voice activity from the chunk level (dBFS) against a
+     * tracked noise floor; there is no button to release. */
+    float wfloor = 0.0f;
+    bool spoke = false;
+    size_t loud = 0, quiet = 0;
+    s_wake_cancel = false;
     while (n + MUSE_AUDIO_CHUNK <= stop_at) {
         if (muse_audio_read(s_chunk, MUSE_AUDIO_CHUNK) != ESP_OK) {
             break;
@@ -420,11 +434,29 @@ static bool record(char *why, size_t cap)
         if (!heard && ok && tick) {
             muse_state_set_caption(s_live ? "LISTENING %.1fs" : "RECORDING %.1fs", (double)n / MUSE_AUDIO_RATE);
         }
+        if (s_wake_note) {
+            float db = muse_audio_dbfs(s_chunk, MUSE_AUDIO_CHUNK);
+            wfloor = db < wfloor ? db : wfloor + 0.02f;
+            bool loud_now = n > WAKE_NOTE_IGNORE_FRAMES && db > (wfloor + 10.0f > -48.0f ? wfloor + 10.0f : -48.0f);
+            loud = loud_now ? loud + 1 : 0;
+            if (loud >= WAKE_NOTE_SPEECH_CHUNKS) spoke = true;
+            if (spoke) {
+                quiet = loud_now ? 0 : quiet + 1;
+                if (quiet >= WAKE_NOTE_SILENCE_CHUNKS) {
+                    ESP_LOGI(TAG, "wake note: silence, sending");
+                    stop_at = n;
+                }
+            } else if (n >= WAKE_NOTE_NO_SPEECH_FRAMES) {
+                ESP_LOGI(TAG, "wake note: no speech, cancelled");
+                s_wake_cancel = true;
+                stop_at = n;
+            }
+        }
         /*
          * Capture runs 60-80 ms behind real time and people let go on their
          * last syllable, so keep going briefly after release.
          */
-        if (!released && got_event(NOTE_TOGGLE ? MUSE_PTT_DOWN : MUSE_PTT_UP)) {
+        if (!released && got_event(NOTE_TOGGLE || s_wake_note ? MUSE_PTT_DOWN : MUSE_PTT_UP)) {
             released = true;
             stop_at = n + TAIL_FRAMES < MAX_FRAMES ? n + TAIL_FRAMES : MAX_FRAMES;
         }
@@ -1271,7 +1303,7 @@ static void voice_task(void *arg)
     bool pending_down = false;
     muse_audio_selftest();
     for (;;) {
-        bool wake = false;
+        bool wake = false, wake_note = false;
         if (!pending_down) {
             muse_input_event_t ev;
             bool asleep = muse_state_asleep();
@@ -1341,33 +1373,30 @@ static void voice_task(void *arg)
             /* The 20 ms read paces this loop. */
             idle_capture();
             if (xQueueReceive(s_queue, &ev, 0) != pdTRUE) {
-#if CONFIG_MUSE_WAKE_WORD_HI_MUSE && CONFIG_MUSE_REALTIME_VOICE
-                /* "Hi Muse": the same live call a tap on the talk button starts
-                 * (note_held() -> NOTE_TAP -> run_call(false, 0) below). */
-                if (muse_wake_take() && !atomic_load(&s_shutdown) && muse_voice_call_ready()) {
-                    ESP_LOGI(TAG, "wake word: starting a call");
-                    muse_state_set_asleep(false);
-                    muse_state_poke();
-                    muse_wifi_power(MUSE_WIFI_FULL);
-                    s_press_input_epoch = muse_input_call_epoch();
-                    s_press_mark = 0;
-                    run_call(false, 0);
-                    pre_reset();
+                /* "Hi Muse": a voice note as if the talk button were held from
+                 * now; record() ends it on silence. Not the call a tap starts. */
+                if (!muse_wake_take() || atomic_load(&s_shutdown)) continue;
+                ESP_LOGI(TAG, "wake word: starting a voice note");
+                muse_state_set_asleep(false);
+                muse_state_poke();
+                s_press_input_epoch = muse_input_call_epoch();
+                s_press_mark = 0;
+                s_press_us = esp_timer_get_time();
+                wake_note = true;
+                s_pre_fill = 0;   /* nothing from before the wake word belongs to the note */
+            } else {
+                muse_state_poke();
+                if (ev.type != MUSE_PTT_DOWN || ev.epoch != muse_input_call_epoch()) {
+                    muse_input_clear_call_pending(ev.mark);
+                    continue;
                 }
-#endif
-                continue;
+                s_press_input_epoch = ev.epoch;
+                s_press_mark = ev.mark;
+                s_press_us = ev.at_us;
+                wake = ev.wake;
             }
-            muse_state_poke();
-            if (ev.type != MUSE_PTT_DOWN || ev.epoch != muse_input_call_epoch()) {
-                muse_input_clear_call_pending(ev.mark);
-                continue;
-            }
-            s_press_input_epoch = ev.epoch;
-            s_press_mark = ev.mark;
-            s_press_us = ev.at_us;
-            wake = ev.wake;
         }
-        bool ptt = muse_voice_ptt_enabled();
+        bool ptt = !wake_note && muse_voice_ptt_enabled();
         if (wake && ptt && !ptt_held_on_waking()) {
             /* A tap: it only woke Muse. A press posted since keeps its own mark. */
             muse_input_clear_call_pending(s_press_mark);
@@ -1418,7 +1447,8 @@ static void voice_task(void *arg)
             continue;
         }
         note_toggled(true);
-        if (!wake) result = note_held(false, pending_down);
+        if (wake_note) result = NOTE_ACCEPTED;   /* the virtual hold is already satisfied */
+        else if (!wake) result = note_held(false, pending_down);
         pending_down = false;
         if (result != NOTE_ACCEPTED) {
             note_toggled(false);
@@ -1441,8 +1471,19 @@ static void voice_task(void *arg)
             continue;
         }
         char why[96];
+        s_wake_note = wake_note;
         bool ok = record(why, sizeof(why));
+        s_wake_note = false;
         note_toggled(false);
+        if (s_wake_cancel) {
+            s_wake_cancel = false;
+            if (s_live) muse_hatch_turn_cancel();
+            s_live = false;
+            drop_rec();
+            pre_reset();
+            go_idle("");
+            continue;
+        }
         if (!ok) {
             pre_reset();
             go_idle(why);   /* Hatch failed it while recording */
