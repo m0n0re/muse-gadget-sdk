@@ -1,15 +1,14 @@
 /*
  * Local extension of this fork: StackChan base LEDs. See muse_led.h.
  *
- * Control path (from M5's M5IOE1 library as I know it; NOTHING in this tree confirms it, so
- * every step is read back and logged):
+ * Control path (M5IOE1 datasheet / M5 ESPHome docs; every step is still read back and logged):
  *   - LED data leaves the expander on its LED pin (IO14, bit 13 of the 16-bit pin registers).
  *     That pin is kept an enabled push-pull output (MODE 0x03 / OUT 0x05 / OD 0x13, the
  *     16-bit pair registers the servo code already uses for VM EN).
- *   - LED_CFG (0x30, 8 bit): bits 5..0 = LED count, bit 6 = refresh (push the RAM to the strip).
- *   - LED RAM from 0x40, 2 bytes per LED, RGB565, low byte first.
- *   - The 5 V bus boost (CoreS3 AW9523 P1_7 = BOOST_EN, expander pin 15 in the BSP numbering)
- *     feeds the strip per M5's ESPHome notes; it is switched on through the BSP's expander.
+ *   - LED_CFG (0x24, 8 bit): bits 5..0 = LED count, bit 6 = refresh (push the RAM to the strip).
+ *   - LED RAM from 0x30, 2 bytes per LED, RGB565, low byte first.
+ *   - The strip's 5 V needs BOTH BOOST_EN (CoreS3 AW9523 number 15) and then BUS_OUT_EN (number 1),
+ *     switched on through the BSP's expander.
  * If the strip stays dark, the log lines "led: ..." say which readback differed.
  */
 #include "muse_led.h"
@@ -36,10 +35,11 @@ static const char *TAG = "led";
 #define REG_MODE 0x03
 #define REG_OUT 0x05
 #define REG_OD 0x13
-#define REG_LED_CFG 0x30
-#define REG_LED_RAM 0x40
+#define REG_LED_CFG 0x24            /* bit6 = REFRESH, bits 5..0 = LED count */
+#define REG_LED_RAM 0x30            /* 2 bytes per LED, RGB565, up to 32 LEDs (0x30..0x6F) */
 #define LED_CFG_REFRESH 0x40
 #define BOOST_EN_PIN IO_EXPANDER_PIN_NUM_15   /* AW9523 P1_7 */
+#define BUS_OUT_EN_PIN IO_EXPANDER_PIN_NUM_1  /* AW9523 P0_1: the base LED 5 V needs this AND BOOST_EN */
 #define HW_CAP 0.25f                /* brightness 100 % = this fraction of full */
 #define POLL_MS 100
 #define BREATH_STEP_MS 150
@@ -51,6 +51,7 @@ static bool s_manual;               /* guarded by s_mu */
 static int s_cur[3] = { -1, -1, -1 };   /* last colour written (after scaling), guarded by s_mu */
 static int s_man[4];                /* last manual r,g,b,brightness, guarded by s_mu */
 static bool s_redraw;               /* re-apply the mode colour on the next poll, guarded by s_mu */
+static bool s_refresh_logged;       /* guarded by s_mu */
 static volatile bool s_diag;        /* led.diag running: every other led command is busy */
 
 static uint16_t rgb565(int r, int g, int b)
@@ -71,6 +72,14 @@ static bool write_color_locked(int r, int g, int b, const char *why)
     uint8_t cfg = LED_COUNT | LED_CFG_REFRESH;
     esp_err_t err = muse_ioe_write(REG_LED_RAM, ram, sizeof(ram));
     if (err == ESP_OK) err = muse_ioe_write(REG_LED_CFG, &cfg, 1);
+    if (err == ESP_OK && !s_refresh_logged) {
+        uint8_t rb = 0xFF;
+        if (muse_ioe_read(REG_LED_CFG, &rb, 1) == ESP_OK) {
+            s_refresh_logged = true;
+            ESP_LOGI(TAG, "LED_CFG after refresh: wrote 0x%02x, read back 0x%02x (REFRESH %s)", cfg, rb,
+                     (rb & LED_CFG_REFRESH) ? "stays set: not self-clearing" : "cleared: self-clearing");
+        }
+    }
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "write (%s) rgb %d,%d,%d failed: %s", why, r, g, b, esp_err_to_name(err));
         s_cur[0] = s_cur[1] = s_cur[2] = -1;
@@ -208,11 +217,25 @@ static void led_task(void *arg)
     /* 1. The 5 V boost, through the BSP's AW9523 (shared with its own users, so only our pin). */
     esp_io_expander_handle_t io = bsp_io_expander_init();
     if (io) {
+        uint32_t lv = 0;
+        esp_err_t r = esp_io_expander_get_level(io, BOOST_EN_PIN | BUS_OUT_EN_PIN, &lv);
+        ESP_LOGI(TAG, "before: AW9523 BOOST_EN(15)=%d BUS_OUT_EN(1)=%d (read %s)", (lv & BOOST_EN_PIN) ? 1 : 0,
+                 (lv & BUS_OUT_EN_PIN) ? 1 : 0, esp_err_to_name(r));
+        bool bus_was_on = r == ESP_OK && (lv & BUS_OUT_EN_PIN);
         esp_err_t e = esp_io_expander_set_dir(io, BOOST_EN_PIN, IO_EXPANDER_OUTPUT);
         if (e == ESP_OK) e = esp_io_expander_set_level(io, BOOST_EN_PIN, 1);
-        ESP_LOGI(TAG, "BOOST_EN (AW9523 P1_7) high: %s", esp_err_to_name(e));
+        ESP_LOGI(TAG, "BOOST_EN (AW9523 number 15) high: %s", esp_err_to_name(e));
+        vTaskDelay(pdMS_TO_TICKS(20));   /* BOOST_EN first, then BUS_OUT_EN */
+        e = esp_io_expander_set_dir(io, BUS_OUT_EN_PIN, IO_EXPANDER_OUTPUT);
+        if (e == ESP_OK) e = esp_io_expander_set_level(io, BUS_OUT_EN_PIN, 1);
+        ESP_LOGI(TAG, "BUS_OUT_EN (AW9523 number 1) high: %s%s", esp_err_to_name(e),
+                 bus_was_on ? " (was already high: the BSP had it on)" : "");
+        lv = 0;
+        r = esp_io_expander_get_level(io, BOOST_EN_PIN | BUS_OUT_EN_PIN, &lv);
+        ESP_LOGI(TAG, "after: AW9523 BOOST_EN(15)=%d BUS_OUT_EN(1)=%d (read %s)", (lv & BOOST_EN_PIN) ? 1 : 0,
+                 (lv & BUS_OUT_EN_PIN) ? 1 : 0, esp_err_to_name(r));
     } else {
-        ESP_LOGW(TAG, "BOOST_EN: no BSP io expander handle");
+        ESP_LOGW(TAG, "BOOST_EN/BUS_OUT_EN: no BSP io expander handle");
     }
 
     /* 2. The LED pin of the M5IOE1: push-pull, output, high. */
@@ -227,7 +250,7 @@ static void led_task(void *arg)
         ESP_LOGE(TAG, "LED pin set-up failed: %s: LEDs disabled", esp_err_to_name(err));
         vTaskDelete(NULL);
     }
-    ESP_LOGI(TAG, "LED pin (bit 13): MODE=0x%02x%02x OUT=0x%02x%02x OD=0x%02x%02x", mode[1], mode[0], out[1], out[0],
+    ESP_LOGI(TAG, "LED pin (bit 13, IO14): MODE=0x%02x%02x OUT=0x%02x%02x OD=0x%02x%02x", mode[1], mode[0], out[1], out[0],
              od[1], od[0]);
 
     /* 3. LED count, then a readback of it and of the first RAM word after a first write. */
