@@ -60,6 +60,13 @@ bool muse_servo_gesture(muse_gesture_t g, muse_servo_cb cb, void *ctx, const cha
 /* The wake word started a voice note: lift the head a little, and return it a few seconds
  * later. Fire and forget; does nothing if the servos are busy or unavailable. */
 void muse_servo_listen_pose(void);
+/* Raw access to the body's IO expander (0x6F), serialised with the servo's own use of it.
+ * ESP_ERR_INVALID_STATE if the expander was not found. Used by muse_led.c. */
+#include "esp_err.h"
+#include <stddef.h>
+esp_err_t muse_ioe_write(uint8_t reg, const uint8_t *data, size_t n);   /* n <= 32 */
+esp_err_t muse_ioe_read(uint8_t reg, uint8_t *data, size_t n);
+esp_err_t muse_ioe_update16(uint8_t reg, uint16_t mask, uint16_t bits);   /* 16-bit register pair */
 #else
 static inline void muse_servo_start(void) {}
 static inline void muse_servo_get_state(muse_servo_state_t *out) { *out = (muse_servo_state_t){0}; }

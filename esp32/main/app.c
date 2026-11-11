@@ -41,6 +41,7 @@
 #include "esp_efuse.h"
 #include <math.h>
 #if CONFIG_MUSE_BOARD_M5STACK_CORES3
+#include "muse_led.h"
 #include "muse_servo.h"
 #include "muse_state.h"
 #endif
@@ -2096,6 +2097,31 @@ static cJSON *on_ws_command(
     }
 #endif
 #if CONFIG_MUSE_BOARD_M5STACK_CORES3
+    if (strcmp(command, "led.set") == 0) {
+        cJSON *jr = cJSON_GetObjectItem(params, "r");
+        cJSON *jg = cJSON_GetObjectItem(params, "g");
+        cJSON *jb = cJSON_GetObjectItem(params, "b");
+        cJSON *jbr = cJSON_GetObjectItem(params, "brightness");
+        if (!cJSON_IsNumber(jr) || !cJSON_IsNumber(jg) || !cJSON_IsNumber(jb)) {
+            return command_error("missing_param", "r, g and b (0-255) are required");
+        }
+        if (jbr && !cJSON_IsNumber(jbr)) return command_error("invalid_params", "brightness must be a number 0-100");
+        if (!muse_led_available()) return command_error("unavailable", "the base LEDs are not available");
+        if (!muse_led_set((int)jr->valuedouble, (int)jg->valuedouble, (int)jb->valuedouble,
+                          jbr ? (int)jbr->valuedouble : 100)) {
+            return command_error("failed", "writing the LEDs failed");
+        }
+        cJSON *result = cJSON_CreateObject();
+        cJSON_AddBoolToObject(result, "ok", true);
+        return result;
+    }
+    if (strcmp(command, "led.off") == 0) {
+        if (!muse_led_available()) return command_error("unavailable", "the base LEDs are not available");
+        if (!muse_led_off()) return command_error("failed", "writing the LEDs failed");
+        cJSON *result = cJSON_CreateObject();
+        cJSON_AddBoolToObject(result, "ok", true);
+        return result;
+    }
     if (strcmp(command, "head.state") == 0) {
         muse_servo_state_t st;
         muse_servo_get_state(&st);

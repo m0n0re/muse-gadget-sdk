@@ -28,6 +28,7 @@
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/idf_additions.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 
 static const char *TAG = "servo";
@@ -84,6 +85,7 @@ static atomic_int s_job_state = J_IDLE;
 static TaskHandle_t s_task;
 static i2c_master_dev_handle_t s_ioe;
 static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
+static SemaphoreHandle_t s_ioe_mu;   /* one I2C transaction group on the expander at a time (servo and LED) */
 static muse_servo_state_t s_state;   /* guarded by s_lock */
 static int64_t s_return_at_us;       /* worker only: when the listen pose ends */
 static float s_return_pitch;
@@ -172,21 +174,64 @@ static void servo_write_pos(uint8_t id, int raw, int time_ms)
 }
 
 /* ---- IO expander ---- */
+static void ioe_lock(void)
+{
+    if (s_ioe_mu) xSemaphoreTake(s_ioe_mu, portMAX_DELAY);
+}
+
+static void ioe_unlock(void)
+{
+    if (s_ioe_mu) xSemaphoreGive(s_ioe_mu);
+}
+
 static esp_err_t ioe_update(uint8_t reg, uint16_t mask, uint16_t bits)
 {
     uint8_t b[2];
+    ioe_lock();
     esp_err_t err = i2c_master_transmit_receive(s_ioe, &reg, 1, b, 2, 100);
-    if (err != ESP_OK) return err;
-    uint16_t v = (uint16_t)(b[0] | b[1] << 8);
-    v = (uint16_t)((v & ~mask) | (bits & mask));
-    uint8_t w[3] = { reg, (uint8_t)v, (uint8_t)(v >> 8) };
-    return i2c_master_transmit(s_ioe, w, sizeof(w), 100);
+    if (err == ESP_OK) {
+        uint16_t v = (uint16_t)(b[0] | b[1] << 8);
+        v = (uint16_t)((v & ~mask) | (bits & mask));
+        uint8_t w[3] = { reg, (uint8_t)v, (uint8_t)(v >> 8) };
+        err = i2c_master_transmit(s_ioe, w, sizeof(w), 100);
+    }
+    ioe_unlock();
+    return err;
+}
+
+/* Shared with muse_led.c: raw register access to the same expander, serialised with the above. */
+esp_err_t muse_ioe_write(uint8_t reg, const uint8_t *data, size_t n)
+{
+    if (!s_ioe || n > 32) return ESP_ERR_INVALID_STATE;
+    uint8_t w[33] = { reg };
+    memcpy(w + 1, data, n);
+    ioe_lock();
+    esp_err_t err = i2c_master_transmit(s_ioe, w, n + 1, 100);
+    ioe_unlock();
+    return err;
+}
+
+esp_err_t muse_ioe_read(uint8_t reg, uint8_t *data, size_t n)
+{
+    if (!s_ioe) return ESP_ERR_INVALID_STATE;
+    ioe_lock();
+    esp_err_t err = i2c_master_transmit_receive(s_ioe, &reg, 1, data, n, 100);
+    ioe_unlock();
+    return err;
+}
+
+esp_err_t muse_ioe_update16(uint8_t reg, uint16_t mask, uint16_t bits)
+{
+    if (!s_ioe) return ESP_ERR_INVALID_STATE;
+    return ioe_update(reg, mask, bits);
 }
 
 static esp_err_t ioe_read(uint8_t reg, uint16_t *v)
 {
     uint8_t b[2];
+    ioe_lock();
     esp_err_t err = i2c_master_transmit_receive(s_ioe, &reg, 1, b, 2, 100);
+    ioe_unlock();
     if (err == ESP_OK) *v = (uint16_t)(b[0] | b[1] << 8);
     return err;
 }
@@ -462,6 +507,7 @@ void muse_servo_start(void)
         return;
     }
     ESP_LOGI(TAG, "IO expander found at 0x%02x", IOE_ADDR);
+    s_ioe_mu = xSemaphoreCreateMutex();
     const i2c_device_config_t dev = {
         .dev_addr_length = I2C_ADDR_BIT_LEN_7,
         .device_address = IOE_ADDR,

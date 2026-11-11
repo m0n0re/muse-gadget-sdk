@@ -1646,6 +1646,28 @@ static char *build_register_json(void) {
                     "The head's current yaw and pitch in degrees and whether "
                     "the servo supply (VM EN) is on.",
                     nullptr, nullptr);
+
+        // The 12 RGB LEDs on the base (muse_led.c).
+        cJSON *led_required = cJSON_CreateObject();
+        for (const char *ch : {"r", "g", "b"}) {
+            cJSON *p = cJSON_CreateObject();
+            cJSON_AddStringToObject(p, "type", "integer");
+            cJSON_AddStringToObject(p, "description", "Colour channel, 0 to 255.");
+            cJSON_AddItemToObject(led_required, ch, p);
+        }
+        cJSON *led_optional = cJSON_CreateObject();
+        cJSON *br_param = cJSON_CreateObject();
+        cJSON_AddStringToObject(br_param, "type", "integer");
+        cJSON_AddStringToObject(br_param, "description",
+                                "Brightness in percent, 0 to 100 (default 100; "
+                                "100 is the safe hardware cap, about 25% of full).");
+        cJSON_AddItemToObject(led_optional, "brightness", br_param);
+        add_command(commands, "led.set",
+                    "Light all 12 base LEDs in one colour. Stays until the "
+                    "avatar state changes (listening, thinking, speaking...), "
+                    "when the LEDs go back to following it.",
+                    led_required, led_optional);
+        add_command(commands, "led.off", "Turn the base LEDs off.", nullptr, nullptr);
     }
 #endif
 
