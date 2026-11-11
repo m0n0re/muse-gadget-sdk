@@ -25,11 +25,13 @@
 #include "driver/i2c_master.h"
 #include "driver/uart.h"
 #include "esp_log.h"
+#include "esp_random.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/idf_additions.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "muse_state.h"
 
 static const char *TAG = "servo";
 
@@ -61,6 +63,20 @@ static const char *TAG = "servo";
 #define MAX_MOVE_MS 12000
 #define LISTEN_LIFT_DEG 8.0f
 #define LISTEN_HOLD_US (10 * 1000000LL)
+#define POLL_MS 100                 /* worker wake-up for the idle motion / nod checks */
+#define AMB_MIN_S 40                /* idle glance: random gap */
+#define AMB_MAX_S 100
+#define AMB_DPS 25.0f               /* idle glance speed (limit: 30 deg/s) */
+#define AMB_HOLD_MIN_MS 2000
+#define AMB_HOLD_MAX_MS 5000
+#define AMB_PITCH_MIN 15.0f
+#define AMB_PITCH_MAX 28.0f
+#define AMB_NEAR_NEUTRAL_DEG 3.0f   /* only glance from (about) the neutral pose */
+#define AMB_IDLE_SETTLE_S 5.0f      /* mode must have been idle this long */
+#define NOD_DEPTH_MIN 3.0f
+#define NOD_DEPTH_MAX 6.0f
+#define NOD_GAP_MIN_MS 900
+#define NOD_GAP_MAX_MS 1800
 
 /* SCSCL instructions and registers */
 #define INST_PING 0x01
@@ -299,8 +315,14 @@ static void drive(float yaw, float pitch)
 }
 
 /* Smooth move from the current angles; the duration is at least what `dps` allows. */
-static void move_to(float yaw, float pitch, int ms, float dps)
+static bool bg_abort(int expect_mode);
+
+/* `bg_mode` >= 0: a background move (idle glance / nod): quiet, and it stops at once when a job is
+ * pending or the avatar mode leaves `bg_mode`; the angles then are where it got to. Returns whether
+ * it reached the target. */
+static bool move_ex(float yaw, float pitch, int ms, float dps, int bg_mode)
 {
+    bool bg = bg_mode != -1;
     yaw = clampf(yaw, -MUSE_SERVO_YAW_MAX, MUSE_SERVO_YAW_MAX);
     pitch = clampf(pitch, MUSE_SERVO_PITCH_MIN, MUSE_SERVO_PITCH_MAX);
     float dy = yaw - s_cur_yaw, dp = pitch - s_cur_pitch;
@@ -308,17 +330,24 @@ static void move_to(float yaw, float pitch, int ms, float dps)
     int need = (int)(far / dps * 1000.0f);
     int dur = ms > need ? ms : need;
     if (dur > MAX_MOVE_MS) dur = MAX_MOVE_MS;
-    ESP_LOGI(TAG, "move start: yaw %.1f -> %.1f, pitch %.1f -> %.1f over %d ms", s_cur_yaw, yaw, s_cur_pitch, pitch, dur);
+    if (!bg) ESP_LOGI(TAG, "move start: yaw %.1f -> %.1f, pitch %.1f -> %.1f over %d ms", s_cur_yaw, yaw, s_cur_pitch, pitch, dur);
     portENTER_CRITICAL(&s_lock);
     s_state.moving = true;
     portEXIT_CRITICAL(&s_lock);
     float y0 = s_cur_yaw, p0 = s_cur_pitch;
     int64_t t0 = esp_timer_get_time();
+    bool done = true;
     while (true) {
         int64_t el = (esp_timer_get_time() - t0) / 1000;
         if (el >= dur) break;
         float t = (float)el / dur;
         float e = t * t * (3.0f - 2.0f * t);   /* smoothstep */
+        if (bg && bg_abort(bg_mode == 99 ? -1 : bg_mode)) {
+            yaw = y0 + (yaw - y0) * e;   /* stop here */
+            pitch = p0 + (pitch - p0) * e;
+            done = false;
+            break;
+        }
         drive(y0 + (yaw - y0) * e, p0 + (pitch - p0) * e);
         vTaskDelay(pdMS_TO_TICKS(STEP_MS));
     }
@@ -329,7 +358,116 @@ static void move_to(float yaw, float pitch, int ms, float dps)
     portENTER_CRITICAL(&s_lock);
     s_state.moving = false;
     portEXIT_CRITICAL(&s_lock);
-    ESP_LOGI(TAG, "move done: yaw %.1f, pitch %.1f", yaw, pitch);
+    if (!bg) ESP_LOGI(TAG, "move done: yaw %.1f, pitch %.1f", yaw, pitch);
+    return done;
+}
+
+static void move_to(float yaw, float pitch, int ms, float dps) { move_ex(yaw, pitch, ms, dps, -1); }
+
+/* ---- Background motion: idle glances and speaking nods (worker only; never claims the job slot) ---- */
+static bool s_bg_valid;              /* a background motion was cut short by a job: its base pose */
+static float s_bg_yaw, s_bg_pitch;
+static int64_t s_next_amb_us;
+
+static uint32_t rnd_range(uint32_t lo, uint32_t hi) { return lo + esp_random() % (hi - lo + 1); }
+static float rnd_f(float lo, float hi) { return lo + (hi - lo) * (esp_random() / 4294967295.0f); }
+
+static bool bg_abort(int expect_mode)
+{
+    if (atomic_load(&s_job_state) == J_PENDING) return true;   /* an explicit command wins */
+    if (expect_mode < 0) return false;
+    float secs;
+    return (int)muse_state_mode(&secs) != expect_mode;
+}
+
+/* Waits `ms`; false if cut short. */
+static bool bg_wait(int ms, int expect_mode)
+{
+    for (int left = ms; left > 0; left -= 50) {
+        if (bg_abort(expect_mode)) return false;
+        vTaskDelay(pdMS_TO_TICKS(left < 50 ? left : 50));
+    }
+    return !bg_abort(expect_mode);
+}
+
+static void bg_cut_short(float base_yaw, float base_pitch)
+{
+    s_bg_valid = true;
+    s_bg_yaw = base_yaw;
+    s_bg_pitch = base_pitch;
+}
+
+static void amb_schedule(void) { s_next_amb_us = esp_timer_get_time() + (int64_t)rnd_range(AMB_MIN_S, AMB_MAX_S) * 1000000LL; }
+
+static void idle_glance(void)
+{
+    const float ny = MUSE_SERVO_NEUTRAL_YAW, np = MUSE_SERVO_NEUTRAL_PITCH;
+    const int M = (int)MUSE_MODE_IDLE;
+    int pattern = (int)rnd_range(0, 3);
+    float sign = (esp_random() & 1) ? 1.0f : -1.0f;
+    float y1 = ny + sign * rnd_f(10.0f, 20.0f), p1 = rnd_f(AMB_PITCH_MIN, AMB_PITCH_MAX);
+    float y2 = ny - sign * rnd_f(10.0f, 20.0f), p2 = rnd_f(AMB_PITCH_MIN, AMB_PITCH_MAX);
+    if (pattern == 1) y1 = ny;                         /* look up/down only */
+    if (pattern == 2) { y1 = ny + sign * rnd_f(10.0f, 20.0f); p1 = np; }   /* look sideways only */
+    bool two = pattern == 3;                           /* glance one way, then the other */
+    y1 = clampf(y1, -MUSE_SERVO_YAW_MAX, MUSE_SERVO_YAW_MAX);
+    p1 = clampf(p1, MUSE_SERVO_PITCH_MIN, MUSE_SERVO_PITCH_MAX);
+    y2 = clampf(y2, -MUSE_SERVO_YAW_MAX, MUSE_SERVO_YAW_MAX);
+    p2 = clampf(p2, MUSE_SERVO_PITCH_MIN, MUSE_SERVO_PITCH_MAX);
+    ESP_LOGI(TAG, "idle motion start: pattern %d, to yaw %.1f pitch %.1f%s", pattern, y1, p1, two ? " then the other side" : "");
+    bool ok = move_ex(y1, p1, 0, AMB_DPS, M) && bg_wait((int)rnd_range(AMB_HOLD_MIN_MS, AMB_HOLD_MAX_MS), M);
+    if (ok && two) {
+        ok = move_ex(y2, p2, 0, AMB_DPS, M) && bg_wait((int)rnd_range(AMB_HOLD_MIN_MS, AMB_HOLD_MAX_MS), M);
+    }
+    const char *why = ok ? "finished" : (atomic_load(&s_job_state) == J_PENDING ? "a head command arrived" : "mode changed");
+    if (atomic_load(&s_job_state) == J_PENDING) {
+        bg_cut_short(ny, np);   /* the command runs from here; a listen pose returns to neutral */
+    } else {
+        /* back to neutral; a command can still cut this return short */
+        if (!move_ex(ny, np, 0, ok ? AMB_DPS : 2.0f * AMB_DPS, 99)) bg_cut_short(ny, np);
+    }
+    ESP_LOGI(TAG, "idle motion end: %s, yaw %.1f pitch %.1f", why, s_cur_yaw, s_cur_pitch);
+    amb_schedule();
+}
+
+static void speaking_nods(void)
+{
+    const int M = (int)MUSE_MODE_SPEAKING;
+    float by = s_cur_yaw, bp = s_cur_pitch;
+    int n = 0;
+    ESP_LOGI(TAG, "nod start: base pitch %.1f", bp);
+    while (!bg_abort(M)) {
+        float depth = rnd_f(NOD_DEPTH_MIN, NOD_DEPTH_MAX);
+        if (!move_ex(by, bp - depth, (int)rnd_range(170, 260), MAX_DPS, M)) break;
+        if (!move_ex(by, bp, (int)rnd_range(230, 340), MAX_DPS, M)) break;
+        n++;
+        if (!bg_wait((int)rnd_range(NOD_GAP_MIN_MS, NOD_GAP_MAX_MS), M)) break;
+    }
+    if (atomic_load(&s_job_state) == J_PENDING) {
+        bg_cut_short(by, bp);
+        ESP_LOGI(TAG, "nod end: a head command arrived (%d nods)", n);
+    } else {
+        move_ex(by, bp, 400, MAX_DPS, 99);   /* back to the base from where the speech started */
+        if (atomic_load(&s_job_state) == J_PENDING) bg_cut_short(by, bp);
+        ESP_LOGI(TAG, "nod end: speech over, pitch back to %.1f (%d nods)", bp, n);
+    }
+}
+
+static void background_tick(void)
+{
+    if (atomic_load(&s_job_state) != J_IDLE) return;
+    muse_servo_state_t st;
+    muse_servo_get_state(&st);
+    if (!st.available || !st.pos_valid) return;
+    float secs = 0;
+    muse_mode_t m = muse_state_mode(&secs);
+    if (m == MUSE_MODE_SPEAKING) {
+        speaking_nods();
+    } else if (m == MUSE_MODE_IDLE && secs >= AMB_IDLE_SETTLE_S && s_return_at_us == 0 &&
+               esp_timer_get_time() >= s_next_amb_us && fabsf(s_cur_yaw - MUSE_SERVO_NEUTRAL_YAW) <= AMB_NEAR_NEUTRAL_DEG &&
+               fabsf(s_cur_pitch - MUSE_SERVO_NEUTRAL_PITCH) <= AMB_NEAR_NEUTRAL_DEG) {
+        idle_glance();
+    }
 }
 
 /* Before a job: the position must be real, never a guess (a guessed start can sweep through a hard stop). */
@@ -385,6 +523,10 @@ static void finish(bool ok, const char *code, const char *message)
 static void run_job(void)
 {
     job_kind_t kind = s_job.kind;
+    /* A background motion that a job cut short: its base pose, so the listen pose does not return to a mid-glance angle. */
+    bool had_bg = s_bg_valid;
+    float bg_y = s_bg_yaw, bg_p = s_bg_pitch;
+    s_bg_valid = false;
     if (kind != JOB_LISTEN) s_return_at_us = 0;
     if (!ensure_position()) {
         ESP_LOGW(TAG, "job refused: servos do not answer a position read");
@@ -400,8 +542,8 @@ static void run_job(void)
         run_gesture(s_job.gesture);
         break;
     case JOB_LISTEN:
-        if (s_return_at_us == 0) s_return_pitch = s_cur_pitch;
-        move_to(s_cur_yaw, s_return_pitch + LISTEN_LIFT_DEG, 300, MAX_DPS);
+        if (s_return_at_us == 0) s_return_pitch = had_bg ? bg_p : s_cur_pitch;
+        move_to(had_bg ? bg_y : s_cur_yaw, s_return_pitch + LISTEN_LIFT_DEG, 300, MAX_DPS);
         s_return_at_us = esp_timer_get_time() + LISTEN_HOLD_US;
         break;
     default:
@@ -462,11 +604,13 @@ static void servo_task(void *arg)
                  SEED_PITCH);
     }
 
+    amb_schedule();
     while (true) {
-        TickType_t wait = portMAX_DELAY;
+        TickType_t wait = pdMS_TO_TICKS(POLL_MS);
         if (s_return_at_us) {
             int64_t left = s_return_at_us - esp_timer_get_time();
-            wait = left > 0 ? pdMS_TO_TICKS(left / 1000 + 1) : 0;
+            TickType_t w = left > 0 ? pdMS_TO_TICKS(left / 1000 + 1) : 0;
+            if (w < wait) wait = w;
         }
         ulTaskNotifyTake(pdTRUE, wait);
         if (atomic_load(&s_job_state) == J_PENDING) {
@@ -482,6 +626,8 @@ static void servo_task(void *arg)
                 if (st.pos_valid) move_to(s_cur_yaw, s_return_pitch, 600, MAX_DPS);
                 atomic_store(&s_job_state, J_IDLE);
             }
+        } else {
+            background_tick();
         }
     }
 }
@@ -518,7 +664,7 @@ void muse_servo_start(void)
         ESP_LOGE(TAG, "expander add failed (%s): servos disabled", esp_err_to_name(err));
         return;
     }
-    if (xTaskCreateWithCaps(servo_task, "servo", 4096, NULL, 4, &s_task, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS) {
+    if (xTaskCreateWithCaps(servo_task, "servo", 6144, NULL, 4, &s_task, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS) {
         ESP_LOGE(TAG, "servo task not started: servos disabled");
     }
 }
