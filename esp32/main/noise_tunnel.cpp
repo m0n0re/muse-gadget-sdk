@@ -57,6 +57,12 @@ extern "C" bool noise_tx_has_dma_headroom(size_t *dma_free) {
     return available >= NOISE_TX_DMA_RESERVE_BYTES;
 }
 
+extern "C" bool noise_tx_has_small_frame_dma_headroom(size_t *dma_free) {
+    size_t available = heap_caps_get_free_size(MALLOC_CAP_DMA);
+    if (dma_free) *dma_free = available;
+    return available >= NOISE_TX_DMA_SMALL_FRAME_BYTES;
+}
+
 #if CONFIG_HOMEHUB_DAEMON_REQUESTS
 extern "C" bool noise_tx_has_dma_headroom_reclaiming(size_t reclaimable) {
     return heap_caps_get_free_size(MALLOC_CAP_DMA) + reclaimable
@@ -355,8 +361,22 @@ extern "C" void noise_tunnel_tick(const noise_tunnel_emit_t *emit) {
         && now - s_last_rx_us >= TUN_KEEPALIVE_INTERVAL_US) {
         // The ping seals through the same AES DMA path as data. Leave the
         // timestamp unchanged while gated so the next tick can retry.
-        if (!noise_tx_has_dma_headroom(nullptr)
-            || !noise_tx_has_contiguous_dma_headroom()) return;
+        // One sentinel byte: use the small-frame floor (6 KiB total + 2 KiB
+        // contiguous), not the 16 KiB batch margin that never clears with the
+        // wake word resident.
+        size_t ping_dma_free = 0;
+        if (!noise_tx_has_small_frame_dma_headroom(&ping_dma_free)
+            || !noise_tx_has_contiguous_dma_headroom()) {
+            if (now >= s_next_tx_heap_log_us) {
+                s_next_tx_heap_log_us = now + TUN_TX_HEAP_LOG_INTERVAL_US;
+                ESP_LOGW(TAG, "tunnel keepalive ping waiting for DMA headroom: "
+                         "dma free %u (need %u), dma largest %u (need %u)",
+                         (unsigned)ping_dma_free, (unsigned)NOISE_TX_DMA_SMALL_FRAME_BYTES,
+                         (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_DMA),
+                         (unsigned)NOISE_TX_DMA_CONTIGUOUS_BYTES);
+            }
+            return;
+        }
         s_last_ping_us = now;
         const uint8_t ping = TUN_KEEPALIVE_SENTINEL;
         if (!emit->send_body(emit->ctx, &ping, 1)) {

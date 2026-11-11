@@ -884,6 +884,7 @@ struct pending_json_body {
     noise_ctrl_session_generation_t session_generation = 0;
     bool is_registration = false;
     bool is_heartbeat = false;
+    bool is_small_result = false;  // single-chunk invoke result: relaxed DMA floor
 };
 
 static void clear_pending_json_body(pending_json_body &body) {
@@ -892,7 +893,7 @@ static void clear_pending_json_body(pending_json_body &body) {
 }
 
 // Minimum total free DMA heap to send link.register / link.heartbeat (see send_json_body_chunk).
-static constexpr size_t REGISTER_MIN_DMA_BYTES = 6 * 1024;
+static constexpr size_t REGISTER_MIN_DMA_BYTES = NOISE_TX_DMA_SMALL_FRAME_BYTES;
 
 enum class json_send_status { Pending, Complete, Failed };
 
@@ -922,7 +923,8 @@ static json_send_status send_json_body_chunk(esp_tls_t *tls, ClientSession &sess
     {
         size_t dma_free = 0;
         bool total_ok = noise_tx_has_dma_headroom(&dma_free);
-        const bool small_session_msg = body.is_registration || body.is_heartbeat;
+        const bool small_session_msg = body.is_registration || body.is_heartbeat
+                                       || body.is_small_result;
         if (!total_ok && small_session_msg
             && dma_free >= REGISTER_MIN_DMA_BYTES) {
             total_ok = true;
@@ -936,7 +938,8 @@ static json_send_status send_json_body_chunk(esp_tls_t *tls, ClientSession &sess
                 ESP_LOGW(TAG, "%s send waiting for DMA headroom: dma free %u (need %u%s), "
                          "dma largest %u (need 2048); free internal %u, largest %u",
                          body.is_registration ? "link.register" :
-                         body.is_heartbeat ? "link.heartbeat" : "control message",
+                         body.is_heartbeat ? "link.heartbeat" :
+                         body.is_small_result ? "invoke result" : "control message",
                          (unsigned)dma_free,
                          (unsigned)(small_session_msg ? REGISTER_MIN_DMA_BYTES
                                                          : NOISE_TX_DMA_RESERVE_BYTES),
@@ -2460,7 +2463,10 @@ static session_result_t run_session(stack_monitor_t *stack) {
             }
         }
         pending_result pr;
-        while (!control_tx.json && noise_tx_has_dma_headroom(nullptr)
+        // Results are small by premise: dequeue under the small-frame floor.
+        // A result over NOISE_TX_SMALL_FRAME_MAX_JSON is flagged non-small
+        // below and then waits at the send stage for the full 16 KiB margin.
+        while (!control_tx.json && noise_tx_has_small_frame_dma_headroom(nullptr)
                && xQueueReceive(s_result_q, &pr, 0) == pdTRUE) {
             if (!noise_ctrl_session_is_current(
                     pr.session_generation, session_generation)) {
@@ -2475,6 +2481,8 @@ static session_result_t run_session(stack_monitor_t *stack) {
             free(pr.request_id);
             if (json) {
                 control_tx = {json, strlen(json), 0, false, session_generation};
+                control_tx.is_small_result =
+                    control_tx.json_len <= NOISE_TX_SMALL_FRAME_MAX_JSON;
             }
         }
         if (control_tx.json) {
@@ -2502,7 +2510,8 @@ static session_result_t run_session(stack_monitor_t *stack) {
                 }
                 ESP_LOGI(TAG, "sent %s (%u bytes)",
                          control_tx.is_registration ? "link.register" :
-                         control_tx.is_heartbeat ? "link.heartbeat" : "control message",
+                         control_tx.is_heartbeat ? "link.heartbeat" :
+                         control_tx.is_small_result ? "invoke result" : "control message",
                          (unsigned)control_tx.json_len);
                 clear_pending_json_body(control_tx);
             }
