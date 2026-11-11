@@ -36,6 +36,7 @@
 #include <unistd.h>
 
 #include "bsp/esp-bsp.h"
+#include "driver/i2c_master.h"
 #include "esp_heap_caps.h"
 #include "esp_memory_utils.h"
 #include "esp_jpeg_enc.h"
@@ -163,6 +164,8 @@ static void stream_close(stream_t *s)
     }
 }
 
+static void gc0308_dump_regs(const char *when, bool repair);
+
 static esp_err_t stream_open(stream_t *s, bool require_yuyv)
 {
     memset(s, 0, sizeof(*s));
@@ -248,22 +251,108 @@ static esp_err_t stream_open(stream_t *s, bool require_yuyv)
         return ESP_FAIL;
     }
     s->streaming = true;
+    vTaskDelay(pdMS_TO_TICKS(50));
+    gc0308_dump_regs("after STREAMON", true);
     return ESP_OK;
 }
 
+
 /*
- * The GC0308 puts Cr (V) where esp_video's "YUYV" says Cb (U): bytes come out Y0 V Y1 U (YVYU),
- * while the JPEG encoder's YCbYCr is Y0 U Y1 V. The result was magenta/green false colour with a
- * correct picture. esp_jpeg_enc has no YVYU input, so swap the two chroma bytes of every pixel
- * pair in place, in the PSRAM frame buffer (no extra memory, internal RAM untouched).
+ * Diagnostic: read back the GC0308's format-related registers over the shared SCCB bus (address
+ * 0x21, 8-bit register, page 0) and log each against what esp_cam_sensor's table for
+ * "YUV422_YUYV_320x240_20fps_subsample" writes (gc0308_select_page0_default +
+ * gc0308_settings_yuv422_yuyv + init_reglist_DVP_8bit_320x240_20fps_subsample). exp = -1: the
+ * table never writes it, so the value is the chip's power-on default. 0x25 is 0x0f only once
+ * streaming; 0x1a bit 0 is cleared by set_stream. Mismatches are flagged with "DIFF".
+ * repair: put 0x24 (output format) back to 0xa2 and clear 0x2e bit 0 (test pattern) if they differ.
  */
-static void yvyu_to_yuyv_inplace(uint8_t *frame, size_t bytes)
+#define GC0308_ADDR 0x21
+typedef struct { uint8_t reg; int exp; const char *what; } gc_reg_t;
+static const gc_reg_t s_gc_regs[] = {
+    { 0x00, 0x9b, "chip id" },
+    { 0x24, 0xa2, "output format (a2 = YCbYCr, a0 = CbYCrY, a6 = RGB565, b1 = Y only)" },
+    { 0x25, 0x0f, "output enable (0f = on)" },
+    { 0x2e, -1, "debug mode (bit0 = test pattern)" },
+    { 0x1a, 0x2a, "analog mode (bit0 clear = running)" },
+    { 0x22, 0x57, "function enable (AWB etc.)" },
+    { 0x23, -1, "function enable 2" },
+    { 0x14, 0x11, "mirror/flip" },
+    { 0x80, 0x03, "block enable 1" },
+    { 0x81, -1, "block enable 2" },
+    { 0x82, -1, "block enable 3" },
+    { 0x83, -1, "block enable 4" },
+    { 0xb1, 0x40, "saturation Cb" },
+    { 0xb2, 0x40, "saturation Cr" },
+    { 0xb3, 0x40, "luma contrast" },
+    { 0xb6, 0xe0, "chroma enable/ABS" },
+    { 0xd0, 0xcb, "AEC/ABS" },
+    { 0xd2, 0x90, "AEC enable" },
+    { 0xdb, 0x92, "colour/CC" },
+    { 0xdc, 0xa5, "colour/CC" },
+    { 0xdf, 0x23, "colour/CC" },
+    { 0x50, 0x14, "crop/out window" },
+    { 0x52, 0x41, "UV related" },
+    { 0x53, 0x80, "UV gain" },
+    { 0x54, 0x80, "UV gain" },
+    { 0x55, 0x80, "UV gain" },
+    { 0x56, 0x80, "UV gain" },
+    { 0x93, 0x48, "cc matrix" },
+    { 0x94, 0x02, "cc matrix" },
+    { 0x95, 0x07, "cc matrix" },
+    { 0x96, 0xe0, "cc matrix" },
+    { 0x97, 0x40, "cc matrix" },
+    { 0x98, 0xf0, "cc matrix" },
+};
+
+static esp_err_t gc_read(i2c_master_dev_handle_t dev, uint8_t reg, uint8_t *val)
 {
-    for (size_t i = 0; i + 3 < bytes; i += 4) {
-        uint8_t t = frame[i + 1];
-        frame[i + 1] = frame[i + 3];
-        frame[i + 3] = t;
+    return i2c_master_transmit_receive(dev, &reg, 1, val, 1, 100);
+}
+
+static void gc0308_dump_regs(const char *when, bool repair)
+{
+    i2c_master_bus_handle_t bus = bsp_i2c_get_handle();
+    i2c_master_dev_handle_t dev = NULL;
+    const i2c_device_config_t dc = {
+        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
+        .device_address = GC0308_ADDR,
+        .scl_speed_hz = 100000,
+    };
+    if (!bus || i2c_master_bus_add_device(bus, &dc, &dev) != ESP_OK) {
+        ESP_LOGW(TAG, "GC0308 regs (%s): cannot open SCCB device 0x%02x", when, GC0308_ADDR);
+        return;
     }
+    uint8_t v = 0;
+    const uint8_t page0[] = { 0xfe, 0x00 };
+    i2c_master_transmit(dev, page0, sizeof(page0), 100);   /* the reads below are page 0 */
+    ESP_LOGI(TAG, "GC0308 regs (%s), page 0:", when);
+    for (size_t i = 0; i < sizeof(s_gc_regs) / sizeof(s_gc_regs[0]); i++) {
+        const gc_reg_t *r = &s_gc_regs[i];
+        if (gc_read(dev, r->reg, &v) != ESP_OK) {
+            ESP_LOGW(TAG, "  reg 0x%02x read failed (%s)", r->reg, r->what);
+            continue;
+        }
+        if (r->exp < 0) {
+            ESP_LOGI(TAG, "  reg 0x%02x = 0x%02x  (table: not written)  %s", r->reg, v, r->what);
+        } else if (v == r->exp) {
+            ESP_LOGI(TAG, "  reg 0x%02x = 0x%02x  (table 0x%02x, ok)  %s", r->reg, v, r->exp, r->what);
+        } else {
+            ESP_LOGW(TAG, "  reg 0x%02x = 0x%02x  DIFF (table 0x%02x)  %s", r->reg, v, r->exp, r->what);
+        }
+    }
+    if (repair) {
+        if (gc_read(dev, 0x24, &v) == ESP_OK && v != 0xa2) {
+            const uint8_t w[] = { 0x24, 0xa2 };
+            ESP_LOGW(TAG, "output format reg 0x24 was 0x%02x, rewriting 0xa2", v);
+            i2c_master_transmit(dev, w, sizeof(w), 100);
+        }
+        if (gc_read(dev, 0x2e, &v) == ESP_OK && (v & 1)) {
+            const uint8_t w[] = { 0x2e, (uint8_t)(v & ~1) };
+            ESP_LOGW(TAG, "test pattern bit set in reg 0x2e (0x%02x), clearing", v);
+            i2c_master_transmit(dev, w, sizeof(w), 100);
+        }
+    }
+    i2c_master_bus_rm_device(dev);
 }
 
 /* Drops CAM_SETTLE_FRAMES, then returns the next one (still dequeued) in *out. */
@@ -324,13 +413,11 @@ static esp_err_t cam_capture(camera_frame_t *out)
             err = ESP_ERR_INVALID_SIZE;
         }
         if (err == ESP_OK) {
-            yvyu_to_yuyv_inplace((uint8_t *)yuv, CAM_FRAME_BYTES);
-            ESP_LOGI(TAG, "swapped U/V (sensor YVYU -> encoder YUYV) in place in the frame buffer");
             jpg = heap_caps_malloc(JPEG_OUT_MAX, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
             jpeg_enc_config_t jc = DEFAULT_JPEG_ENC_CONFIG();
             jc.width = CAM_W;
             jc.height = CAM_H;
-            jc.src_type = JPEG_PIXEL_FORMAT_YCbYCr;   /* Y0 Cb Y1 Cr, after the U/V swap above */
+            jc.src_type = JPEG_PIXEL_FORMAT_YCbYCr;   /* Y0 Cb Y1 Cr: the standard YUYV order, no swap */
             jc.subsampling = JPEG_SUBSAMPLE_420;
             jc.quality = JPEG_QUALITY;
             jpeg_enc_handle_t enc = NULL;
