@@ -81,9 +81,15 @@ bool noise_tx_has_dma_headroom(size_t *dma_free);
 // the wake word resident total free DMA sits below the 16 KiB margin for good,
 // so gating these on it silences the session. Large sends keep the full margin.
 #define NOISE_TX_DMA_SMALL_FRAME_BYTES (6 * 1024)
+// Dequeue/send floor for a SMALL invoke result only (not register/heartbeat/ping). A
+// camera.look reply is queued right after a capture, when total free DMA is briefly
+// ~5.6 KiB; waiting for 6 KiB left it unsent. One result is a single chunk that needs
+// ~2 KiB contiguous (checked separately), so 4 KiB total is enough.
+#define NOISE_TX_DMA_SMALL_RESULT_BYTES (4 * 1024)
 // Largest control JSON message (bytes) that counts as small.
 #define NOISE_TX_SMALL_FRAME_MAX_JSON 2048
 bool noise_tx_has_small_frame_dma_headroom(size_t *dma_free);
+bool noise_tx_has_small_result_dma_headroom(size_t *dma_free);
 
 // The same margin, counting `reclaimable` bytes the send itself frees (queued
 // daemon request payloads; on boards without PSRAM they are DMA-capable too).

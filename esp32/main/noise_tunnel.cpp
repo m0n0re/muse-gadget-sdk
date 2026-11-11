@@ -63,6 +63,12 @@ extern "C" bool noise_tx_has_small_frame_dma_headroom(size_t *dma_free) {
     return available >= NOISE_TX_DMA_SMALL_FRAME_BYTES;
 }
 
+extern "C" bool noise_tx_has_small_result_dma_headroom(size_t *dma_free) {
+    size_t available = heap_caps_get_free_size(MALLOC_CAP_DMA);
+    if (dma_free) *dma_free = available;
+    return available >= NOISE_TX_DMA_SMALL_RESULT_BYTES;
+}
+
 #if CONFIG_HOMEHUB_DAEMON_REQUESTS
 extern "C" bool noise_tx_has_dma_headroom_reclaiming(size_t reclaimable) {
     return heap_caps_get_free_size(MALLOC_CAP_DMA) + reclaimable

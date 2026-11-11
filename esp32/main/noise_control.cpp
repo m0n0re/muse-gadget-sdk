@@ -929,6 +929,11 @@ static json_send_status send_json_body_chunk(esp_tls_t *tls, ClientSession &sess
             && dma_free >= REGISTER_MIN_DMA_BYTES) {
             total_ok = true;
         }
+        // A small invoke result (camera.look's reply) may go at the lower result floor.
+        if (!total_ok && body.is_small_result
+            && dma_free >= NOISE_TX_DMA_SMALL_RESULT_BYTES) {
+            total_ok = true;
+        }
         bool contig_ok = noise_tx_has_contiguous_dma_headroom();
         if (!total_ok || !contig_ok) {
             static uint64_t s_next_wait_log_us = 0;
@@ -941,7 +946,8 @@ static json_send_status send_json_body_chunk(esp_tls_t *tls, ClientSession &sess
                          body.is_heartbeat ? "link.heartbeat" :
                          body.is_small_result ? "invoke result" : "control message",
                          (unsigned)dma_free,
-                         (unsigned)(small_session_msg ? REGISTER_MIN_DMA_BYTES
+                         (unsigned)(body.is_small_result ? NOISE_TX_DMA_SMALL_RESULT_BYTES :
+                                    small_session_msg ? REGISTER_MIN_DMA_BYTES
                                                          : NOISE_TX_DMA_RESERVE_BYTES),
                          body.is_registration ? " for register" :
                          body.is_heartbeat ? " for heartbeat" : "",
@@ -2550,7 +2556,21 @@ static session_result_t run_session(stack_monitor_t *stack) {
         // Results are small by premise: dequeue under the small-frame floor.
         // A result over NOISE_TX_SMALL_FRAME_MAX_JSON is flagged non-small
         // below and then waits at the send stage for the full 16 KiB margin.
-        while (!control_tx.json && noise_tx_has_small_frame_dma_headroom(nullptr)
+        // The dequeue floor is the small-result one (4 KiB): a reply queued right after a
+        // capture sees only ~5.6 KiB free DMA for a while. Log when a queued result is held back.
+        if (!control_tx.json && uxQueueMessagesWaiting(s_result_q) > 0) {
+            size_t q_dma = 0;
+            if (!noise_tx_has_small_result_dma_headroom(&q_dma)) {
+                static uint64_t s_next_q_log_us = 0;
+                uint64_t qnow = esp_timer_get_time();
+                if (qnow >= s_next_q_log_us) {
+                    s_next_q_log_us = qnow + 5 * 1000000ULL;
+                    ESP_LOGW(TAG, "invoke result held in queue: dma free %u (need %u)",
+                             (unsigned)q_dma, (unsigned)NOISE_TX_DMA_SMALL_RESULT_BYTES);
+                }
+            }
+        }
+        while (!control_tx.json && noise_tx_has_small_result_dma_headroom(nullptr)
                && xQueueReceive(s_result_q, &pr, 0) == pdTRUE) {
             if (!noise_ctrl_session_is_current(
                     pr.session_generation, session_generation)) {

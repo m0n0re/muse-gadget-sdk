@@ -249,6 +249,21 @@ static esp_err_t stream_open(stream_t *s)
     return ESP_OK;
 }
 
+/*
+ * The GC0308 puts Cr (V) where esp_video's "YUYV" says Cb (U): bytes come out Y0 V Y1 U (YVYU),
+ * while the JPEG encoder's YCbYCr is Y0 U Y1 V. The result was magenta/green false colour with a
+ * correct picture. esp_jpeg_enc has no YVYU input, so swap the two chroma bytes of every pixel
+ * pair in place, in the PSRAM frame buffer (no extra memory, internal RAM untouched).
+ */
+static void yvyu_to_yuyv_inplace(uint8_t *frame, size_t bytes)
+{
+    for (size_t i = 0; i + 3 < bytes; i += 4) {
+        uint8_t t = frame[i + 1];
+        frame[i + 1] = frame[i + 3];
+        frame[i + 3] = t;
+    }
+}
+
 /* Drops CAM_SETTLE_FRAMES, then returns the next one (still dequeued) in *out. */
 static esp_err_t stream_grab(stream_t *s, const uint8_t **out, size_t *len)
 {
@@ -307,11 +322,13 @@ static esp_err_t cam_capture(camera_frame_t *out)
             err = ESP_ERR_INVALID_SIZE;
         }
         if (err == ESP_OK) {
+            yvyu_to_yuyv_inplace((uint8_t *)yuv, CAM_FRAME_BYTES);
+            ESP_LOGI(TAG, "swapped U/V (sensor YVYU -> encoder YUYV) in place in the frame buffer");
             jpg = heap_caps_malloc(JPEG_OUT_MAX, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
             jpeg_enc_config_t jc = DEFAULT_JPEG_ENC_CONFIG();
             jc.width = CAM_W;
             jc.height = CAM_H;
-            jc.src_type = JPEG_PIXEL_FORMAT_YCbYCr;   /* the sensor's YUYV */
+            jc.src_type = JPEG_PIXEL_FORMAT_YCbYCr;   /* Y0 Cb Y1 Cr, after the U/V swap above */
             jc.subsampling = JPEG_SUBSAMPLE_420;
             jc.quality = JPEG_QUALITY;
             jpeg_enc_handle_t enc = NULL;
