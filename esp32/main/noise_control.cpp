@@ -1682,6 +1682,13 @@ static char *build_register_json(void) {
                     "the servo supply (VM EN) is on.",
                     nullptr, nullptr);
 
+        add_command(commands, "notify.get",
+                    "Query the notification speech settings: whether spoken "
+                    "notifications are enabled and the time window they are "
+                    "allowed in (from_min and to_min, minutes after midnight). "
+                    "Read-only; does not wake the device or reset its sleep timer.",
+                    nullptr, nullptr);
+
         // The 12 RGB LEDs on the base (muse_led.c).
         cJSON *led_required = cJSON_CreateObject();
         for (const char *ch : {"r", "g", "b"}) {
