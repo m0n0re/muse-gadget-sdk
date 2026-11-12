@@ -67,6 +67,15 @@ bool muse_settings_ble_on(void);
 /* StopWatch: false selects realtime PTT; true selects voice notes only. */
 bool muse_settings_voice_notes(void);
 void muse_settings_set_voice_notes(bool on);
+/* Spoken notifications (read by the host through notify.get; polled, notifies nothing).
+ * The window is minutes since 0:00 local time, from inclusive; from > to wraps past midnight. */
+#define MUSE_NOTIFY_MIN_PER_DAY 1440
+bool muse_settings_notify_speak(void);
+int muse_settings_notify_from_min(void);    /* 0..1439, default 540 (9:00) */
+int muse_settings_notify_to_min(void);      /* 0..1439, default 1320 (22:00) */
+void muse_settings_set_notify_speak(bool on);
+void muse_settings_set_notify_from_min(int min);
+void muse_settings_set_notify_to_min(int min);
 
 void muse_settings_wifi(char ssid[MUSE_SSID_MAX + 1], char pass[MUSE_PASS_MAX + 1]);
 void muse_settings_hatch_host(char out[MUSE_HOST_MAX + 1]);

@@ -42,6 +42,9 @@ static struct {
     uint8_t text_size;
     bool wifi_on;
     bool ble_on;
+    bool notify_speak;
+    uint16_t notify_from;
+    uint16_t notify_to;
     char ssid[MUSE_SSID_MAX + 1];
     char pass[MUSE_PASS_MAX + 1];
     char host[MUSE_HOST_MAX + 1];
@@ -55,6 +58,9 @@ static struct {
     .sleep_s = 120,
     .text_size = MUSE_TEXT_MEDIUM,
     .wifi_on = true,
+    .notify_speak = true,
+    .notify_from = 540,     /* 9:00 */
+    .notify_to = 1320,      /* 22:00 */
     .host = DEFAULT_HOST,
 };
 
@@ -139,6 +145,11 @@ esp_err_t muse_settings_init(void)
     if (nvs_get_u8(s_nvs, "ble_on", &b) == ESP_OK) {
         s.ble_on = b;
     }
+    if (nvs_get_u8(s_nvs, "notify_speak", &b) == ESP_OK) {
+        s.notify_speak = b;
+    }
+    nvs_get_u16(s_nvs, "notify_from", &s.notify_from);
+    nvs_get_u16(s_nvs, "notify_to", &s.notify_to);
     load_str("ssid", s.ssid, sizeof(s.ssid));
     load_str("pass", s.pass, sizeof(s.pass));
     load_str("host", s.host, sizeof(s.host));
@@ -149,6 +160,10 @@ esp_err_t muse_settings_init(void)
     s.mic_gain = clampi(s.mic_gain, 0, MUSE_MIC_GAIN_MAX);
     s.brightness = clampi(s.brightness, 10, 100);
     s.text_size = clampi(s.text_size, MUSE_TEXT_SMALL, MUSE_TEXT_LARGE);
+    s.notify_from = clampi(s.notify_from, 0, MUSE_NOTIFY_MIN_PER_DAY - 1);
+    s.notify_to = clampi(s.notify_to, 0, MUSE_NOTIFY_MIN_PER_DAY - 1);
+    ESP_LOGI(TAG, "notify speak %s, %02d:%02d-%02d:%02d", s.notify_speak ? "on" : "off", s.notify_from / 60,
+             s.notify_from % 60, s.notify_to / 60, s.notify_to % 60);
     ESP_LOGI(TAG, "vol %d%s, mic %d dB, bright %d, sleep %ds, wifi %s (%s), ble %s, muse %s",
              s.volume, s.speaker_on ? "" : " (speaker off)", s.mic_gain, s.brightness, s.sleep_s, s.wifi_on ? "on" : "off",
              "network saved by Link", s.ble_on ? "on" : "off", s.token[0] ? "token set" : "no token");
@@ -168,6 +183,9 @@ int muse_settings_sleep_s(void) { return s.sleep_s; }
 int muse_settings_text_size(void) { return s.text_size; }
 bool muse_settings_wifi_on(void) { return s.wifi_on; }
 bool muse_settings_ble_on(void) { return s.ble_on; }
+bool muse_settings_notify_speak(void) { return s.notify_speak; }
+int muse_settings_notify_from_min(void) { return s.notify_from; }
+int muse_settings_notify_to_min(void) { return s.notify_to; }
 bool muse_settings_voice_notes(void) { return atomic_load(&s_voice_notes); }
 
 void muse_settings_set_voice_notes(bool on)
@@ -253,6 +271,26 @@ void muse_settings_set_text_size(int size)
 {
     s.text_size = clampi(size, MUSE_TEXT_SMALL, MUSE_TEXT_LARGE);
     save_u8("text_size", s.text_size);   /* the UI polls it */
+}
+
+void muse_settings_set_notify_speak(bool on)
+{
+    s.notify_speak = on;
+    save_u8("notify_speak", on);
+}
+
+void muse_settings_set_notify_from_min(int min)
+{
+    s.notify_from = clampi(min, 0, MUSE_NOTIFY_MIN_PER_DAY - 1);
+    nvs_set_u16(s_nvs, "notify_from", s.notify_from);
+    nvs_commit(s_nvs);
+}
+
+void muse_settings_set_notify_to_min(int min)
+{
+    s.notify_to = clampi(min, 0, MUSE_NOTIFY_MIN_PER_DAY - 1);
+    nvs_set_u16(s_nvs, "notify_to", s.notify_to);
+    nvs_commit(s_nvs);
 }
 
 void muse_settings_set_wifi_on(bool on)

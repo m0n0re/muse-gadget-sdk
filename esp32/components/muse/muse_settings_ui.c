@@ -121,6 +121,7 @@ static lv_obj_t *s_ble_sw, *s_ble_status;
 #if CONFIG_MUSE_BOARD_M5STACK_STOPWATCH && CONFIG_MUSE_REALTIME_VOICE
 static lv_obj_t *s_notes_sw;
 #endif
+static lv_obj_t *s_notify_sw, *s_notify_from_val, *s_notify_to_val;
 static lv_obj_t *s_spk_sw, *s_vol_val, *s_vol_sl, *s_gain_val, *s_gain_sl, *s_bright_val, *s_bright_sl, *s_mic_bar, *s_mic_val;
 
 /* Sleep page. */
@@ -1288,6 +1289,105 @@ static void on_bright(lv_event_t *e)
     }
 }
 
+/* Notification speech: the Japanese labels need Unifont behind Montserrat. */
+#if CONFIG_MUSE_CJK_FONT
+#if CONFIG_MUSE_CJK_FONT_NOTO
+LV_FONT_DECLARE(muse_font_cjk_noto_16)
+#define SETTINGS_CJK_FONT muse_font_cjk_noto_16
+#else
+LV_FONT_DECLARE(muse_font_cjk_16)
+#define SETTINGS_CJK_FONT muse_font_cjk_16
+#endif
+#endif
+
+static const lv_font_t *jp_font(const lv_font_t *base)
+{
+    base = settings_font(base);
+#if CONFIG_MUSE_CJK_FONT
+    static lv_font_t copies[2];
+    static const lv_font_t *bases[2];
+    for (int i = 0; i < 2; i++) {
+        if (bases[i] == base) {
+            return &copies[i];
+        }
+        if (!bases[i]) {
+            bases[i] = base;
+            copies[i] = *base;
+            copies[i].fallback = &SETTINGS_CJK_FONT;
+            return &copies[i];
+        }
+    }
+#endif
+    return base;
+}
+
+static void set_notify_vals(void);
+
+static void on_notify_sw(lv_event_t *e)
+{
+    muse_settings_set_notify_speak(lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED));
+}
+
+/* user data: bit 0 = 0 for the start time, 1 for the end; bit 1 = 1 to go later. */
+static void on_notify_step(lv_event_t *e)
+{
+    int which = (int)(intptr_t)lv_event_get_user_data(e);
+    int delta = (which & 2) ? 30 : -30;
+    int cur = (which & 1) ? muse_settings_notify_to_min() : muse_settings_notify_from_min();
+    int next = (cur + delta + MUSE_NOTIFY_MIN_PER_DAY) % MUSE_NOTIFY_MIN_PER_DAY;
+    if (which & 1) {
+        muse_settings_set_notify_to_min(next);
+    } else {
+        muse_settings_set_notify_from_min(next);
+    }
+    set_notify_vals();
+}
+
+static lv_obj_t *step_button(lv_obj_t *parent, const char *symbol, int which)
+{
+    lv_obj_t *b = lv_button_create(parent);
+    lv_obj_remove_style_all(b);
+    lv_obj_set_size(b, 44, 40);
+    lv_obj_set_style_radius(b, 12, 0);
+    lv_obj_set_style_bg_opa(b, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(b, lv_color_hex(0x3a3358), 0);
+    lv_obj_set_style_bg_color(b, lv_color_hex(COLOR_CARD_PRESSED), LV_STATE_PRESSED);
+    lv_obj_set_ext_click_area(b, 4);
+    lv_obj_t *l = label(b, &lv_font_montserrat_16, COLOR_TEXT, symbol);
+    lv_obj_center(l);
+    lv_obj_add_event_cb(b, on_notify_step, LV_EVENT_CLICKED, (void *)(intptr_t)which);
+    return b;
+}
+
+/* "開始 [-] 09:00 [+]" in 30 minute steps; which: 0 start, 1 end. */
+static lv_obj_t *notify_time_row(lv_obj_t *list, const char *name, int which, lv_obj_t **val_out)
+{
+    lv_obj_t *c = card(list, false);
+    lv_obj_t *t = lv_label_create(c);
+    lv_obj_set_style_text_font(t, jp_font(&lv_font_montserrat_20), 0);
+    lv_obj_set_style_text_color(t, lv_color_hex(COLOR_TEXT), 0);
+    lv_label_set_text(t, name);
+    lv_obj_set_flex_grow(t, 1);
+    step_button(c, LV_SYMBOL_MINUS, which);
+    lv_obj_t *v = label(c, &lv_font_montserrat_16, COLOR_ACCENT, "");
+    lv_obj_set_width(v, 56);
+    lv_obj_set_style_text_align(v, LV_TEXT_ALIGN_CENTER, 0);
+    step_button(c, LV_SYMBOL_PLUS, which | 2);
+    *val_out = v;
+    return c;
+}
+
+static void set_notify_vals(void)
+{
+    char buf[16];
+    int from = muse_settings_notify_from_min();
+    int to = muse_settings_notify_to_min();
+    snprintf(buf, sizeof(buf), "%02d:%02d", from / 60, from % 60);
+    set_text(s_notify_from_val, buf);
+    snprintf(buf, sizeof(buf), "%02d:%02d", to / 60, to % 60);
+    set_text(s_notify_to_val, buf);
+}
+
 static void build_sound_page(lv_obj_t *tile)
 {
     lv_obj_t *list;
@@ -1335,6 +1435,28 @@ static void build_sound_page(lv_obj_t *tile)
         s_bright_sl = slider(list, "Brightness", 10, 100, muse_settings_brightness(), &s_bright_val, on_bright);
         set_val(s_bright_val, "%d%%", muse_settings_brightness());
     }
+
+    /* Notification speech: whether the host may read a notice aloud, and when. */
+    {
+        lv_obj_t *c = card(list, false);
+        lv_obj_t *t = lv_label_create(c);
+        lv_obj_set_style_text_font(t, jp_font(&lv_font_montserrat_20), 0);
+        lv_obj_set_style_text_color(t, lv_color_hex(COLOR_TEXT), 0);
+        lv_label_set_text(t, "お知らせ読み上げ");
+        lv_obj_set_flex_grow(t, 1);
+        lv_obj_t *sw = lv_switch_create(c);
+        lv_obj_set_size(sw, wide_layout() ? 76 : stacked_rows() ? 44 : 60, wide_layout() ? 42 : s_tiny ? 24 : 32);
+        lv_obj_set_style_bg_color(sw, lv_color_hex(0x3a3358), LV_PART_MAIN);
+        lv_obj_set_style_bg_color(sw, lv_color_hex(COLOR_ACCENT), LV_PART_INDICATOR | LV_STATE_CHECKED);
+        if (muse_settings_notify_speak()) {
+            lv_obj_add_state(sw, LV_STATE_CHECKED);
+        }
+        lv_obj_add_event_cb(sw, on_notify_sw, LV_EVENT_VALUE_CHANGED, NULL);
+        s_notify_sw = sw;
+        notify_time_row(list, "開始", 0, &s_notify_from_val);
+        notify_time_row(list, "終了", 1, &s_notify_to_val);
+        set_notify_vals();
+    }
     if (s_vol_val) set_val(s_vol_val, "%d%%", muse_settings_volume());
     set_val(s_gain_val, "%d dB", muse_settings_mic_gain() / 3 * 3);
 }
@@ -1350,6 +1472,13 @@ static void tick_sound(void)
     bool on = muse_settings_speaker_on();   /* also toggled from the face */
     if (s_spk_sw && on != lv_obj_has_state(s_spk_sw, LV_STATE_CHECKED)) {
         lv_obj_set_state(s_spk_sw, LV_STATE_CHECKED, on);
+    }
+    if (s_notify_sw) {
+        bool ns = muse_settings_notify_speak();
+        if (ns != lv_obj_has_state(s_notify_sw, LV_STATE_CHECKED)) {
+            lv_obj_set_state(s_notify_sw, LV_STATE_CHECKED, ns);
+        }
+        set_notify_vals();
     }
     if (muse_board->epaper) return;
     float db = muse_voice_monitor_db();

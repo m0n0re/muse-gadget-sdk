@@ -44,6 +44,7 @@
 #include "muse_led.h"
 #include "muse_look.h"
 #include "muse_servo.h"
+#include "muse_settings.h"
 #include "muse_state.h"
 #endif
 
@@ -2076,7 +2077,8 @@ static cJSON *on_ws_command(
     // Any received command counts as an interaction: it wakes MUSE_MODE_SLEEP (and restarts the idle timer).
     // Read-only status queries do not (a host may poll them).
 #if CONFIG_MUSE_BOARD_M5STACK_CORES3
-    if (strcmp(command, "head.state") != 0 && strcmp(command, "device.list_vms") != 0) muse_state_poke_why(command);
+    if (strcmp(command, "head.state") != 0 && strcmp(command, "notify.get") != 0 &&
+        strcmp(command, "device.list_vms") != 0) muse_state_poke_why(command);
 #endif
 #if CONFIG_HOMEHUB_BLE_COMMANDS
     if (ble_commands_handles(command)) {
@@ -2241,6 +2243,17 @@ static cJSON *on_ws_command(
         cJSON_AddBoolToObject(result, "position_known", st.pos_valid);
         cJSON_AddBoolToObject(result, "moving", st.moving);
         ESP_LOGI(TAG, "head.state: yaw %.1f pitch %.1f vm_en %d valid %d", st.yaw, st.pitch, st.vm_en, st.pos_valid);
+        return result;
+    }
+    if (strcmp(command, "notify.get") == 0) {
+        // Read-only query (not poked above): the voice-speak policy lives on the device.
+        cJSON *result = cJSON_CreateObject();
+        cJSON_AddBoolToObject(result, "ok", true);
+        cJSON_AddBoolToObject(result, "enabled", muse_settings_notify_speak());
+        cJSON_AddNumberToObject(result, "from_min", muse_settings_notify_from_min());
+        cJSON_AddNumberToObject(result, "to_min", muse_settings_notify_to_min());
+        ESP_LOGI(TAG, "notify.get: enabled %d from %d to %d", muse_settings_notify_speak(),
+                 muse_settings_notify_from_min(), muse_settings_notify_to_min());
         return result;
     }
     if (strcmp(command, "head.move") == 0 || strcmp(command, "head.gesture") == 0) {
