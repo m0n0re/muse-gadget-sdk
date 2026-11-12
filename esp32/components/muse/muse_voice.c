@@ -95,6 +95,18 @@ static bool s_wake_cancel;
 #define WAKE_NOTE_NO_SPEECH_FRAMES (MUSE_AUDIO_RATE * 4)     /* no speech by now: cancel */
 #define WAKE_NOTE_SILENCE_CHUNKS (1200000 / CHUNK_US)        /* 1.2 s of silence after speech ends it */
 #define WAKE_NOTE_SPEECH_CHUNKS 3                            /* consecutive loud chunks that count as speech */
+/* Follow-up listening: after a voice note's reply has played, the mic stays
+ * open for FOLLOW_WINDOW_US. Speech in that time becomes the next note, through
+ * the same record() path as a wake-word note; nothing in it ends the
+ * conversation but silence (timeout), a tap, or FOLLOW_MAX windows in a row. */
+#define FOLLOW_WINDOW_US (10LL * 1000000)
+#define FOLLOW_MAX 5
+static int64_t s_follow_until_us;   /* 0: no window open */
+static int s_follow_n;              /* windows opened since the last wake word or press */
+static float s_follow_floor;        /* noise floor tracked while the window waits */
+static size_t s_follow_loud, s_follow_age;
+static bool s_follow_note;          /* record(): speech was already heard, floor carried over */
+static bool s_reply_ok;             /* hatch_reply() played a whole reply, no error */
 static volatile bool s_monitor;
 static volatile float s_monitor_db = -100.0f;
 static volatile bool s_chirp;
@@ -388,8 +400,9 @@ static bool record(char *why, size_t cap)
     /* Wake-started note: voice activity from the chunk level (dBFS) against a
      * tracked noise floor; there is no button to release. */
     float wfloor = 0.0f;
-    bool spoke = false;
+    bool spoke = s_follow_note;
     size_t loud = 0, quiet = 0;
+    if (s_follow_note) wfloor = s_follow_floor;
     s_wake_cancel = false;
     while (n + MUSE_AUDIO_CHUNK <= stop_at) {
         if (muse_audio_read(s_chunk, MUSE_AUDIO_CHUNK) != ESP_OK) {
@@ -500,6 +513,7 @@ static bool hatch_reply(bool *delivered, bool incoming)
     size_t played = 0;
     int64_t t0 = esp_timer_get_time();
     *delivered = false;
+    s_reply_ok = false;
     for (;;) {
         muse_state_poke();   /* an active turn is activity: don't auto-sleep mid-reply */
         muse_hatch_ev_t ev;
@@ -577,6 +591,7 @@ static bool hatch_reply(bool *delivered, bool incoming)
         /* No speech (TTS unavailable): leave the reply text up for a moment. */
         vTaskDelay(pdMS_TO_TICKS(2500));
     }
+    s_reply_ok = true;
     return false;
 }
 
@@ -586,6 +601,62 @@ static void go_idle(const char *caption)
     muse_state_set_progress(0);
     muse_state_set_mode(MUSE_MODE_IDLE);
     muse_state_set_caption("%s", caption);
+}
+
+/* Opens the follow-up window: listening face and LED, the mic watched for speech. */
+static void follow_open(void)
+{
+    s_follow_n++;
+    s_follow_until_us = esp_timer_get_time() + FOLLOW_WINDOW_US;
+    s_follow_floor = 0.0f;
+    s_follow_loud = s_follow_age = 0;
+    muse_state_poke();
+    muse_state_set_level(0);
+    muse_state_set_progress(0);
+    muse_state_set_caption("%s", "");
+    muse_state_set_mode(MUSE_MODE_LISTENING);
+    ESP_LOGI(TAG, "follow-up: window open %ds (%d/%d, %d left)", (int)(FOLLOW_WINDOW_US / 1000000), s_follow_n,
+             FOLLOW_MAX, FOLLOW_MAX - s_follow_n);
+}
+
+/* Closes the window (no-op if none) and the run of follow-ups. */
+static void follow_end(const char *why)
+{
+    if (!s_follow_until_us) return;
+    s_follow_until_us = 0;
+    s_follow_n = 0;
+    ESP_LOGI(TAG, "follow-up: window closed (%s)", why);
+}
+
+enum { FOLLOW_WAIT, FOLLOW_SPEECH, FOLLOW_OVER };
+
+/* One idle chunk (s_chunk) while the window is open. FOLLOW_OVER: it closed, and
+ * *idle says whether this task should put the face back to idle. */
+static int follow_poll(bool *idle)
+{
+    *idle = false;
+    (void)muse_wake_take();   /* the window already listens: a detection here has nothing to start */
+    muse_state_poke();        /* a conversation is activity, as in a reply: don't auto-sleep */
+    if (atomic_load(&s_shutdown) || muse_voice_in_call() || muse_state_mode(NULL) != MUSE_MODE_LISTENING) {
+        follow_end("yielded");   /* something else has the device */
+        return FOLLOW_OVER;
+    }
+    if (esp_timer_get_time() >= s_follow_until_us) {
+        follow_end("timeout");
+        *idle = true;
+        return FOLLOW_OVER;
+    }
+    if (s_settle > 0) return FOLLOW_WAIT;   /* the reply's own tail */
+    float db = muse_audio_dbfs(s_chunk, MUSE_AUDIO_CHUNK);
+    s_follow_floor = db < s_follow_floor ? db : s_follow_floor + 0.02f;
+    s_follow_age += MUSE_AUDIO_CHUNK;
+    bool loud_now = s_follow_age > WAKE_NOTE_IGNORE_FRAMES &&
+                    db > (s_follow_floor + 10.0f > -48.0f ? s_follow_floor + 10.0f : -48.0f);
+    s_follow_loud = loud_now ? s_follow_loud + 1 : 0;
+    if (s_follow_loud < WAKE_NOTE_SPEECH_CHUNKS) return FOLLOW_WAIT;
+    ESP_LOGI(TAG, "follow-up: speech detected (%d/%d), recording", s_follow_n, FOLLOW_MAX);
+    s_follow_until_us = 0;   /* the run goes on: s_follow_n is kept */
+    return FOLLOW_SPEECH;
 }
 
 /* Errors and status stay up; a press too short to count only needs a hint. */
@@ -1304,7 +1375,7 @@ static void voice_task(void *arg)
     bool pending_down = false;
     muse_audio_selftest();
     for (;;) {
-        bool wake = false, wake_note = false;
+        bool wake = false, wake_note = false, follow_note = false;
         if (!pending_down) {
             muse_input_event_t ev;
             bool asleep = muse_state_asleep();
@@ -1314,6 +1385,7 @@ static void voice_task(void *arg)
             /* A press goes first: send_held() leaves it queued and returns
              * without backing off, so retrying before it's read would spin. */
             if (held_due() && !press_waiting()) {
+                follow_end("yielded");
                 set_resting(false);   /* full power while it goes, even asleep */
                 muse_wifi_power(MUSE_WIFI_FULL);
                 pending_down = send_held(asleep);
@@ -1361,6 +1433,7 @@ static void voice_task(void *arg)
             if (xQueuePeek(s_queue, &next, 0) != pdTRUE && muse_hatch_incoming()) {
                 /* Muse took long and has the answer now: light the screen, say it. */
                 bool delivered;
+                follow_end("yielded");   /* voice.speak or a late reply comes first */
                 muse_state_set_asleep(false);
                 muse_wifi_power(MUSE_WIFI_FULL);
                 pending_down = hatch_reply(&delivered, true);
@@ -1374,20 +1447,45 @@ static void voice_task(void *arg)
             /* The 20 ms read paces this loop. */
             idle_capture();
             if (xQueueReceive(s_queue, &ev, 0) != pdTRUE) {
+                bool follow = false;
+                if (s_follow_until_us) {
+                    /* Follow-up window: speech starts the next note with no wake word. */
+                    bool to_idle;
+                    int r = follow_poll(&to_idle);
+                    if (r == FOLLOW_WAIT) continue;
+                    if (r == FOLLOW_OVER) {
+                        if (to_idle) go_idle("");
+                        continue;
+                    }
+                    follow = true;
+                } else if (!muse_wake_take() || atomic_load(&s_shutdown)) {
+                    continue;
+                }
                 /* "Hi Muse": a voice note as if the talk button were held from
                  * now; record() ends it on silence. Not the call a tap starts. */
-                if (!muse_wake_take() || atomic_load(&s_shutdown)) continue;
-                ESP_LOGI(TAG, "wake word: starting a voice note");
-                muse_state_poke_why("wake word");   /* first: leaves MUSE_MODE_SLEEP before the head lifts */
-                muse_servo_listen_pose();   /* a small lift of the head; non-blocking, a no-op off the CoreS3 */
+                if (!follow) {
+                    ESP_LOGI(TAG, "wake word: starting a voice note");
+                    muse_state_poke_why("wake word");   /* first: leaves MUSE_MODE_SLEEP before the head lifts */
+                    muse_servo_listen_pose();   /* a small lift of the head; non-blocking, a no-op off the CoreS3 */
+                    s_pre_fill = 0;   /* nothing from before the wake word belongs to the note */
+                } else {
+                    follow_note = true;   /* the pre-roll holds the first syllables: keep it */
+                }
                 muse_state_set_asleep(false);
                 s_press_input_epoch = muse_input_call_epoch();
                 s_press_mark = 0;
                 s_press_us = esp_timer_get_time();
                 wake_note = true;
-                s_pre_fill = 0;   /* nothing from before the wake word belongs to the note */
             } else {
                 muse_state_poke();
+                if (s_follow_until_us) {
+                    /* A tap or button in the window ends the conversation here. */
+                    follow_end("tap");
+                    muse_input_clear_call_pending(ev.mark);
+                    pre_reset();
+                    go_idle("");
+                    continue;
+                }
                 if (ev.type != MUSE_PTT_DOWN || ev.epoch != muse_input_call_epoch()) {
                     muse_input_clear_call_pending(ev.mark);
                     continue;
@@ -1398,6 +1496,7 @@ static void voice_task(void *arg)
                 wake = ev.wake;
             }
         }
+        if (!follow_note) s_follow_n = 0;   /* a wake word or press starts a new run of follow-ups */
         bool ptt = !wake_note && muse_voice_ptt_enabled();
         if (wake && ptt && !ptt_held_on_waking()) {
             /* A tap: it only woke Muse. A press posted since keeps its own mark. */
@@ -1474,8 +1573,10 @@ static void voice_task(void *arg)
         }
         char why[96];
         s_wake_note = wake_note;
+        s_follow_note = follow_note;
         bool ok = record(why, sizeof(why));
         s_wake_note = false;
+        s_follow_note = false;
         note_toggled(false);
         if (s_wake_cancel) {
             s_wake_cancel = false;
@@ -1491,9 +1592,14 @@ static void voice_task(void *arg)
             go_idle(why);   /* Hatch failed it while recording */
             continue;
         }
+        s_reply_ok = false;
         pending_down = finish_note();
         pre_reset();
-        if (!pending_down && muse_state_mode(NULL) != MUSE_MODE_IDLE) {
+        if (!pending_down && s_reply_ok && !atomic_load(&s_shutdown) && s_follow_n < FOLLOW_MAX &&
+            muse_state_mode(NULL) != MUSE_MODE_OFF) {
+            follow_open();   /* only a note's reply opens it: not speak, a camera turn or a held note */
+        } else if (!pending_down && muse_state_mode(NULL) != MUSE_MODE_IDLE) {
+            s_follow_n = 0;
             muse_state_make_happy();
             go_idle("");
         }
