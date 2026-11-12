@@ -76,6 +76,10 @@ int muse_settings_notify_to_min(void);      /* 0..1439, default 1320 (22:00) */
 void muse_settings_set_notify_speak(bool on);
 void muse_settings_set_notify_from_min(int min);
 void muse_settings_set_notify_to_min(int min);
+/* CoreS3 avatar sleep (MUSE_MODE_SLEEP): idle minutes before it starts; 0 = never, default 10.
+ * Separate from muse_settings_sleep_s(), the screen-off timer. */
+int muse_settings_sleep_after_min(void);
+void muse_settings_set_sleep_after_min(int min);
 
 void muse_settings_wifi(char ssid[MUSE_SSID_MAX + 1], char pass[MUSE_PASS_MAX + 1]);
 void muse_settings_hatch_host(char out[MUSE_HOST_MAX + 1]);

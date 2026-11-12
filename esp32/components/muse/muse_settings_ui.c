@@ -121,7 +121,7 @@ static lv_obj_t *s_ble_sw, *s_ble_status;
 #if CONFIG_MUSE_BOARD_M5STACK_STOPWATCH && CONFIG_MUSE_REALTIME_VOICE
 static lv_obj_t *s_notes_sw;
 #endif
-static lv_obj_t *s_notify_sw, *s_notify_from_val, *s_notify_to_val;
+static lv_obj_t *s_notify_sw, *s_notify_from_val, *s_notify_to_val, *s_sleepafter_val;
 static lv_obj_t *s_spk_sw, *s_vol_val, *s_vol_sl, *s_gain_val, *s_gain_sl, *s_bright_val, *s_bright_sl, *s_mic_bar, *s_mic_val;
 
 /* Sleep page. */
@@ -1343,7 +1343,7 @@ static void on_notify_step(lv_event_t *e)
     set_notify_vals();
 }
 
-static lv_obj_t *step_button(lv_obj_t *parent, const char *symbol, int which)
+static lv_obj_t *step_button(lv_obj_t *parent, const char *symbol, int which, lv_event_cb_t cb)
 {
     lv_obj_t *b = lv_button_create(parent);
     lv_obj_remove_style_all(b);
@@ -1355,7 +1355,7 @@ static lv_obj_t *step_button(lv_obj_t *parent, const char *symbol, int which)
     lv_obj_set_ext_click_area(b, 4);
     lv_obj_t *l = label(b, &lv_font_montserrat_16, COLOR_TEXT, symbol);
     lv_obj_center(l);
-    lv_obj_add_event_cb(b, on_notify_step, LV_EVENT_CLICKED, (void *)(intptr_t)which);
+    lv_obj_add_event_cb(b, cb, LV_EVENT_CLICKED, (void *)(intptr_t)which);
     return b;
 }
 
@@ -1368,11 +1368,11 @@ static lv_obj_t *notify_time_row(lv_obj_t *list, const char *name, int which, lv
     lv_obj_set_style_text_color(t, lv_color_hex(COLOR_TEXT), 0);
     lv_label_set_text(t, name);
     lv_obj_set_flex_grow(t, 1);
-    step_button(c, LV_SYMBOL_MINUS, which);
+    step_button(c, LV_SYMBOL_MINUS, which, on_notify_step);
     lv_obj_t *v = label(c, &lv_font_montserrat_16, COLOR_ACCENT, "");
     lv_obj_set_width(v, 56);
     lv_obj_set_style_text_align(v, LV_TEXT_ALIGN_CENTER, 0);
-    step_button(c, LV_SYMBOL_PLUS, which | 2);
+    step_button(c, LV_SYMBOL_PLUS, which | 2, on_notify_step);
     *val_out = v;
     return c;
 }
@@ -1494,6 +1494,36 @@ static void tick_sound(void)
 
 static void tick_sleep(void);
 
+/* Avatar sleep (CoreS3 おやすみ): minutes of no interaction; 0 = never. */
+static const int SLEEPAFTER_MIN[] = { 1, 5, 10, 15, 20, 30, 60, 0 };
+#define SLEEPAFTER_COUNT (int)(sizeof(SLEEPAFTER_MIN) / sizeof(SLEEPAFTER_MIN[0]))
+
+static int sleepafter_index(int min)
+{
+    for (int i = 0; i < SLEEPAFTER_COUNT; i++) {
+        if (SLEEPAFTER_MIN[i] == min) return i;
+    }
+    return 2;   /* unknown stored value: step from the default 10 */
+}
+
+static void set_sleepafter_val(void)
+{
+    int m = muse_settings_sleep_after_min();
+    char buf[16];
+    if (m) snprintf(buf, sizeof(buf), "%d分", m);
+    else snprintf(buf, sizeof(buf), "なし");
+    set_text(s_sleepafter_val, buf);
+}
+
+/* user data: 0 = shorter, 1 = longer; ends at 1分 and なし, no wrap. */
+static void on_sleepafter_step(lv_event_t *e)
+{
+    int i = sleepafter_index(muse_settings_sleep_after_min()) + ((int)(intptr_t)lv_event_get_user_data(e) & 2 ? 1 : -1);
+    i = i < 0 ? 0 : (i >= SLEEPAFTER_COUNT ? SLEEPAFTER_COUNT - 1 : i);
+    muse_settings_set_sleep_after_min(SLEEPAFTER_MIN[i]);
+    set_sleepafter_val();
+}
+
 static void on_sleep_choice(lv_event_t *e)
 {
     int secs = SLEEP_CHOICES[(int)(intptr_t)lv_event_get_user_data(e)];
@@ -1517,6 +1547,21 @@ static void build_sleep_page(lv_obj_t *tile)
         s_sleep_rows[i] = row(list, NULL, SLEEP_NAMES[i], &s_sleep_checks[i], on_sleep_choice,
                               (void *)(intptr_t)i);
         lv_obj_set_style_text_color(s_sleep_checks[i], lv_color_hex(COLOR_ACCENT), 0);
+    }
+    if (CONFIG_MUSE_BOARD_M5STACK_CORES3) {
+        /* Not the screen-off list above: this is when the avatar falls asleep (おやすみ). */
+        lv_obj_t *c = card(list, false);
+        lv_obj_t *t = lv_label_create(c);
+        lv_obj_set_style_text_font(t, jp_font(&lv_font_montserrat_20), 0);
+        lv_obj_set_style_text_color(t, lv_color_hex(COLOR_TEXT), 0);
+        lv_label_set_text(t, "おやすみに入るまで");
+        lv_obj_set_flex_grow(t, 1);
+        step_button(c, LV_SYMBOL_MINUS, 0, on_sleepafter_step);
+        s_sleepafter_val = label(c, jp_font(&lv_font_montserrat_16), COLOR_ACCENT, "");
+        lv_obj_set_width(s_sleepafter_val, 56);
+        lv_obj_set_style_text_align(s_sleepafter_val, LV_TEXT_ALIGN_CENTER, 0);
+        step_button(c, LV_SYMBOL_PLUS, 2, on_sleepafter_step);
+        set_sleepafter_val();
     }
     button(list, LV_SYMBOL_EYE_CLOSE "  Sleep now", COLOR_ACCENT, on_sleep_now, NULL);
     note(list, "Tap the screen or press either button to wake.");

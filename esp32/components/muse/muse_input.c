@@ -445,8 +445,6 @@ static void watcher_buttons(unsigned ev)
 }
 #endif
 
-#define AVATAR_SLEEP_S 600   /* CoreS3: no interaction for this long -> MUSE_MODE_SLEEP */
-
 /* A pairing prompt wakes the screen and keeps it on; otherwise idle sleeps. */
 static void check_sleep(void)
 {
@@ -460,9 +458,11 @@ static void check_sleep(void)
     if (muse_voice_in_call()) return;
 #if CONFIG_MUSE_BOARD_M5STACK_CORES3
     /* CoreS3 (StackChan): the one idle timer is the avatar sleep (closed eyes, Z, head down, LEDs
-     * off) after AVATAR_SLEEP_S without interaction. The dark-screen auto-sleep is not used here:
+     * off) after sleep_after_min (setting, 0 = never) without interaction. The dark-screen auto-sleep is not used here:
      * it would hide that face and run its own, different, timer. */
-    if (muse_state_mode(NULL) == MUSE_MODE_IDLE && muse_state_idle_secs() > AVATAR_SLEEP_S) {
+    int after_min = muse_settings_sleep_after_min();
+    if (after_min > 0 && muse_state_mode(NULL) == MUSE_MODE_IDLE && muse_state_idle_secs() > after_min * 60) {
+        ESP_LOGI(TAG, "avatar sleep: idle > %d min", after_min);
         muse_state_enter_sleep("idle timeout");
     }
     return;

@@ -45,6 +45,7 @@ static struct {
     bool notify_speak;
     uint16_t notify_from;
     uint16_t notify_to;
+    uint16_t sleep_after_min;   /* avatar sleep after this many idle minutes; 0 = never */
     char ssid[MUSE_SSID_MAX + 1];
     char pass[MUSE_PASS_MAX + 1];
     char host[MUSE_HOST_MAX + 1];
@@ -61,6 +62,7 @@ static struct {
     .notify_speak = true,
     .notify_from = 540,     /* 9:00 */
     .notify_to = 1320,      /* 22:00 */
+    .sleep_after_min = 10,
     .host = DEFAULT_HOST,
 };
 
@@ -150,6 +152,7 @@ esp_err_t muse_settings_init(void)
     }
     nvs_get_u16(s_nvs, "notify_from", &s.notify_from);
     nvs_get_u16(s_nvs, "notify_to", &s.notify_to);
+    nvs_get_u16(s_nvs, "sleep_after", &s.sleep_after_min);
     load_str("ssid", s.ssid, sizeof(s.ssid));
     load_str("pass", s.pass, sizeof(s.pass));
     load_str("host", s.host, sizeof(s.host));
@@ -162,6 +165,8 @@ esp_err_t muse_settings_init(void)
     s.text_size = clampi(s.text_size, MUSE_TEXT_SMALL, MUSE_TEXT_LARGE);
     s.notify_from = clampi(s.notify_from, 0, MUSE_NOTIFY_MIN_PER_DAY - 1);
     s.notify_to = clampi(s.notify_to, 0, MUSE_NOTIFY_MIN_PER_DAY - 1);
+    s.sleep_after_min = clampi(s.sleep_after_min, 0, 1440);
+    ESP_LOGI(TAG, "avatar sleep after %d min%s", s.sleep_after_min, s.sleep_after_min ? "" : " (never)");
     ESP_LOGI(TAG, "notify speak %s, %02d:%02d-%02d:%02d", s.notify_speak ? "on" : "off", s.notify_from / 60,
              s.notify_from % 60, s.notify_to / 60, s.notify_to % 60);
     ESP_LOGI(TAG, "vol %d%s, mic %d dB, bright %d, sleep %ds, wifi %s (%s), ble %s, muse %s",
@@ -185,6 +190,7 @@ bool muse_settings_wifi_on(void) { return s.wifi_on; }
 bool muse_settings_ble_on(void) { return s.ble_on; }
 bool muse_settings_notify_speak(void) { return s.notify_speak; }
 int muse_settings_notify_from_min(void) { return s.notify_from; }
+int muse_settings_sleep_after_min(void) { return s.sleep_after_min; }
 int muse_settings_notify_to_min(void) { return s.notify_to; }
 bool muse_settings_voice_notes(void) { return atomic_load(&s_voice_notes); }
 
@@ -277,6 +283,13 @@ void muse_settings_set_notify_speak(bool on)
 {
     s.notify_speak = on;
     save_u8("notify_speak", on);
+}
+
+void muse_settings_set_sleep_after_min(int min)
+{
+    s.sleep_after_min = clampi(min, 0, 1440);
+    nvs_set_u16(s_nvs, "sleep_after", s.sleep_after_min);
+    nvs_commit(s_nvs);
 }
 
 void muse_settings_set_notify_from_min(int min)
