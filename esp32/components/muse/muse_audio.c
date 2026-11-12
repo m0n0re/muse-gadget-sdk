@@ -55,6 +55,16 @@ static float s_mic_scale = 1.0f;
  * in muse_audio_read (the one path wake word, notes and calls all read). */
 static float s_dig_scale = 1.0f;
 static float s_hpf_x1, s_hpf_y1;
+/* Digital gain above 100 % volume, applied to every sample written to the
+ * speaker (muse_audio_write and the loopback tone). */
+static float s_out_scale = 1.0f;
+
+static inline int16_t out_sample(int16_t x)
+{
+    if (s_out_scale == 1.0f) return x;
+    float y = (float)x * s_out_scale;
+    return (int16_t)(y > 32767 ? 32767 : (y < -32768 ? -32768 : y));
+}
 
 static void lock(void)
 {
@@ -85,6 +95,13 @@ static bool codecs_reachable(void)
 
 static void apply_volume(int volume)
 {
+    if (volume < 0) volume = 0;
+    if (volume > MUSE_VOLUME_MAX) volume = MUSE_VOLUME_MAX;
+    int codec = volume > 100 ? 100 : volume;
+    float dig_db = volume > 100 ? (float)(volume - 100) * MUSE_VOLUME_DIG_DB_PER_PCT : 0.0f;
+    s_out_scale = powf(10.0f, dig_db / 20.0f);
+    ESP_LOGI(TAG, "volume %d%% (codec %d + digital %.1f dB)", volume, codec, (double)dig_db);
+    volume = codec;
     if (s_spk && codecs_reachable()) {
         esp_codec_dev_set_out_vol(s_spk, volume);
     }
@@ -371,7 +388,7 @@ void muse_audio_loopback_test(int volume)
                 for (int i = 0; i < MUSE_AUDIO_CHUNK; i++) {
                     int16_t v = f ? (int16_t)(amp * sinf(phase)) : 0;
                     phase += 2.0f * (float)M_PI * f / MUSE_AUDIO_RATE;
-                    s_out_stereo[2 * i] = s_out_stereo[2 * i + 1] = v;
+                    s_out_stereo[2 * i] = s_out_stereo[2 * i + 1] = out_sample(v);
                 }
                 esp_codec_dev_write(s_spk, s_out_stereo, sizeof(s_out_stereo));
                 read_input(MUSE_AUDIO_CHUNK);
@@ -445,8 +462,9 @@ esp_err_t muse_audio_write(const int16_t *mono, size_t frames)
     while (frames) {
         size_t n = frames > MUSE_AUDIO_CHUNK ? MUSE_AUDIO_CHUNK : frames;
         for (size_t i = 0; i < n; i++) {
-            s_out_stereo[2 * i] = mute ? 0 : mono[i];
-            s_out_stereo[2 * i + 1] = mute ? 0 : mono[i];
+            int16_t o = mute ? 0 : out_sample(mono[i]);
+            s_out_stereo[2 * i] = o;
+            s_out_stereo[2 * i + 1] = o;
         }
         if (esp_codec_dev_write(s_spk, s_out_stereo, n * CHANNELS * sizeof(int16_t)) != ESP_CODEC_DEV_OK) {
             return ESP_FAIL;

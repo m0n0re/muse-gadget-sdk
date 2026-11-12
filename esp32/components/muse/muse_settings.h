@@ -35,6 +35,8 @@
 #define MUSE_VM_MAX 63
 #define MUSE_TOKEN_MAX 1023
 
+#define MUSE_VOLUME_MAX 150      /* %; 0..100 codec volume, above 100 the rest is digital gain */
+#define MUSE_VOLUME_DIG_DB_PER_PCT 0.24f   /* 150 % = +12 dB */
 #define MUSE_MIC_GAIN_PGA_MAX 36  /* dB; ES7210 PGA ceiling, 3 dB steps */
 #define MUSE_MIC_GAIN_MAX 48      /* dB total; above PGA_MAX the rest is digital gain */
 
@@ -55,7 +57,7 @@ typedef void (*muse_setting_cb_t)(muse_setting_t what);
 esp_err_t muse_settings_init(void);
 void muse_settings_set_listener(muse_setting_cb_t cb);
 
-int muse_settings_volume(void);         /* 0..100 */
+int muse_settings_volume(void);         /* 0..MUSE_VOLUME_MAX */
 bool muse_settings_speaker_on(void);    /* off: replies are shown, not played */
 int muse_settings_mic_gain(void);       /* dB, 0..MUSE_MIC_GAIN_MAX */
 int muse_settings_brightness(void);     /* 10..100 */

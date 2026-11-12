@@ -159,7 +159,7 @@ esp_err_t muse_settings_init(void)
     load_str("vm", s.vm, sizeof(s.vm));
     load_str("token", s.token, sizeof(s.token));
 
-    s.volume = clampi(s.volume, 0, 100);
+    s.volume = clampi(s.volume, 0, MUSE_VOLUME_MAX);
     s.mic_gain = clampi(s.mic_gain, 0, MUSE_MIC_GAIN_MAX);
     s.brightness = clampi(s.brightness, 10, 100);
     s.text_size = clampi(s.text_size, MUSE_TEXT_SMALL, MUSE_TEXT_LARGE);
@@ -239,7 +239,7 @@ size_t muse_settings_hatch_token_len(void)
 
 void muse_settings_set_volume(int pct)
 {
-    s.volume = clampi(pct, 0, 100);
+    s.volume = clampi(pct, 0, MUSE_VOLUME_MAX);
     save_u8("volume", s.volume);
     notify(MUSE_SETTING_VOLUME);
 }

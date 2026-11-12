@@ -1406,7 +1406,7 @@ static void build_sound_page(lv_obj_t *tile)
 #endif
     if (muse_board->audio_init) {
         s_spk_sw = switch_row(list, "Speaker", muse_settings_speaker_on(), on_speaker_sw);
-        s_vol_sl = slider(list, "Volume", 0, 100, muse_settings_volume(), &s_vol_val, on_volume);
+        s_vol_sl = slider(list, "Volume", 0, MUSE_VOLUME_MAX, muse_settings_volume(), &s_vol_val, on_volume);
     }
     s_gain_sl = slider(list, "Mic gain", 0, MUSE_MIC_GAIN_MAX / 3, muse_settings_mic_gain() / 3, &s_gain_val, on_gain);
 
