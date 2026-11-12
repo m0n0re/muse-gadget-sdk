@@ -59,7 +59,9 @@ bool muse_servo_move(float yaw, float pitch, int ms, bool *clamped, muse_servo_c
 bool muse_servo_gesture(muse_gesture_t g, muse_servo_cb cb, void *ctx, const char **code, const char **message);
 /* The wake word started a voice note: lift the head a little, and return it a few seconds
  * later. Fire and forget; does nothing if the servos are busy or unavailable. */
-void muse_servo_listen_pose(void);
+bool muse_servo_listen_pose(void);   /* true: the move was submitted */
+/* A head job (a listen pose, a return, a command) is queued or running: the servo is not settled. */
+bool muse_servo_busy(void);
 /* Raw access to the body's IO expander (0x6F), serialised with the servo's own use of it.
  * ESP_ERR_INVALID_STATE if the expander was not found. Used by muse_led.c. */
 #include "esp_err.h"
@@ -70,7 +72,8 @@ esp_err_t muse_ioe_update16(uint8_t reg, uint16_t mask, uint16_t bits);   /* 16-
 #else
 static inline void muse_servo_start(void) {}
 static inline void muse_servo_get_state(muse_servo_state_t *out) { *out = (muse_servo_state_t){0}; }
-static inline void muse_servo_listen_pose(void) {}
+static inline bool muse_servo_listen_pose(void) { return false; }
+static inline bool muse_servo_busy(void) { return false; }
 #endif
 
 #ifdef __cplusplus

@@ -1370,6 +1370,33 @@ static void note_toggled(bool on)
 #endif
 }
 
+#define POSE_WAIT_MAX_MS 1000   /* no servo, or one that does not answer, must not hold the recording */
+
+/* Before a note records: wait until the head has stopped moving (no servo job queued or running),
+ * for at most POSE_WAIT_MAX_MS. Face and LED already show listening: "getting ready". The mic is
+ * kept drained meanwhile; keep_audio puts it in the pre-roll (a held press: its speech is not lost),
+ * otherwise it is dropped (the servo's own noise). Returns at once if the head is not moving. */
+static void pose_settle(bool keep_audio)
+{
+    if (!muse_servo_busy()) return;
+    muse_state_set_level(0);
+    muse_state_set_mode(MUSE_MODE_LISTENING);
+    int64_t t0 = esp_timer_get_time();
+    bool timeout = false;
+    while (muse_servo_busy()) {
+        if (esp_timer_get_time() - t0 >= POSE_WAIT_MAX_MS * 1000LL) {
+            timeout = true;
+            break;
+        }
+        if (atomic_load(&s_shutdown)) break;
+        if (muse_audio_read(s_chunk, MUSE_AUDIO_CHUNK) != ESP_OK) vTaskDelay(pdMS_TO_TICKS(10));
+        else if (keep_audio) pre_put();
+    }
+    int ms = (int)((esp_timer_get_time() - t0) / 1000);
+    if (timeout) ESP_LOGW(TAG, "pose wait: gave up after %d ms (limit %d), recording anyway", ms, POSE_WAIT_MAX_MS);
+    else ESP_LOGI(TAG, "pose wait: head settled after %d ms, recording", ms);
+}
+
 static void voice_task(void *arg)
 {
     bool pending_down = false;
@@ -1466,7 +1493,7 @@ static void voice_task(void *arg)
                 if (!follow) {
                     ESP_LOGI(TAG, "wake word: starting a voice note");
                     muse_state_poke_why("wake word");   /* first: leaves MUSE_MODE_SLEEP before the head lifts */
-                    muse_servo_listen_pose();   /* a small lift of the head; non-blocking, a no-op off the CoreS3 */
+                    muse_servo_listen_pose();   /* a small lift of the head; non-blocking. Recording waits for it (pose_settle) */
                     s_pre_fill = 0;   /* nothing from before the wake word belongs to the note */
                 } else {
                     follow_note = true;   /* the pre-roll holds the first syllables: keep it */
@@ -1571,6 +1598,10 @@ static void voice_task(void *arg)
             else too_short();
             continue;
         }
+        /* Head first, then the mic: a wake word's lift was sent at detection; a held press sends it now.
+         * A follow-up has no move of its own, but waits if the head is still on its way back. */
+        if (!wake_note && !follow_note) muse_servo_listen_pose();
+        pose_settle(!wake_note);   /* follow-up: speech was already heard, keep it */
         char why[96];
         s_wake_note = wake_note;
         s_follow_note = follow_note;

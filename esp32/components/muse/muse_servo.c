@@ -773,12 +773,19 @@ bool muse_servo_gesture(muse_gesture_t g, muse_servo_cb cb, void *ctx, const cha
     return ok;
 }
 
-void muse_servo_listen_pose(void)
+bool muse_servo_listen_pose(void)
 {
     const char *code, *message;
     if (submit(JOB_LISTEN, 0, 0, 0, MUSE_GESTURE_CENTER, NULL, NULL, &code, &message)) {
         ESP_LOGI(TAG, "wake: lifting the head a little");
+        return true;
     }
+    return false;
+}
+
+bool muse_servo_busy(void)
+{
+    return atomic_load(&s_job_state) != J_IDLE;
 }
 
 #endif /* CONFIG_MUSE_BOARD_M5STACK_CORES3 */
