@@ -51,6 +51,9 @@ static int16_t s_out_stereo[MUSE_AUDIO_CHUNK * CHANNELS];
 /* One-pole high-pass on the mixed mic signal. */
 static float s_hpf_a;
 static float s_mic_scale = 1.0f;
+/* Digital gain above the codec PGA ceiling, applied to every captured sample
+ * in muse_audio_read (the one path wake word, notes and calls all read). */
+static float s_dig_scale = 1.0f;
 static float s_hpf_x1, s_hpf_y1;
 
 static void lock(void)
@@ -89,10 +92,20 @@ static void apply_volume(int volume)
 
 static void apply_mic_gain(int db)
 {
+    if (db < 0) db = 0;
+    if (db > MUSE_MIC_GAIN_MAX) db = MUSE_MIC_GAIN_MAX;
     if (muse_board->mic_init || (!s_mic && muse_board->mic_read)) {
         s_mic_scale = powf(10.0f, (float)db / 20.0f);   /* no codec gain: scale samples */
+        s_dig_scale = 1.0f;
+        ESP_LOGI(TAG, "mic gain %d dB (digital %d)", db, db);
         return;
     }
+    /* PGA up to its ceiling; the rest is digital, applied in muse_audio_read. */
+    int pga = db > MUSE_MIC_GAIN_PGA_MAX ? MUSE_MIC_GAIN_PGA_MAX : db;
+    int dig = db - pga;
+    s_dig_scale = powf(10.0f, (float)dig / 20.0f);
+    ESP_LOGI(TAG, "mic gain %d dB (pga %d + digital %d)", db, pga, dig);
+    db = pga;
     if (!s_mic || !codecs_reachable()) {
         return;
     }
@@ -410,6 +423,7 @@ esp_err_t muse_audio_read(int16_t *mono, size_t frames)
             float y = s_hpf_a * (s_hpf_y1 + x - s_hpf_x1);
             s_hpf_x1 = x;
             s_hpf_y1 = y;
+            if (!direct) y *= s_dig_scale;   /* direct mics already scaled in full */
             mono[i] = (int16_t)(y > 32767 ? 32767 : (y < -32768 ? -32768 : y));
         }
         mono += n;

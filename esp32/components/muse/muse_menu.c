@@ -136,7 +136,7 @@ static const char *const ITEM_ACTIONS[ITEM_COUNT] = {
 /* Ascending; Select moves to the next one and wraps. */
 static const int VOLUME_STEPS[] = { 10, 25, 40, 55, 70, 85, 100 };
 static const int BRIGHT_STEPS[] = { 10, 25, 50, 75, 100 };
-static const int GAIN_STEPS[] = { 0, 6, 12, 18, 24, 30, 36 };
+static const int GAIN_STEPS[] = { 0, 6, 12, 18, 24, 30, 36, 42, 48 };
 static const int SLEEP_STEPS[] = { 0, 30, 60, 120, 300, 600 };
 static const char *const SLEEP_NAMES[] = { "Never", "30 s", "1 min", "2 min", "5 min", "10 min" };
 #if CONFIG_MUSE_SMALL_FULL_REPLY

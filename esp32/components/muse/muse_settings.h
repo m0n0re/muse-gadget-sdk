@@ -35,7 +35,8 @@
 #define MUSE_VM_MAX 63
 #define MUSE_TOKEN_MAX 1023
 
-#define MUSE_MIC_GAIN_MAX 36      /* dB; ES7210 PGA, applied in 3 dB steps */
+#define MUSE_MIC_GAIN_PGA_MAX 36  /* dB; ES7210 PGA ceiling, 3 dB steps */
+#define MUSE_MIC_GAIN_MAX 48      /* dB total; above PGA_MAX the rest is digital gain */
 
 typedef enum {
     MUSE_SETTING_VOLUME,
