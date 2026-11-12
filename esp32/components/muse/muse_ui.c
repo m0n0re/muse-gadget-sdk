@@ -267,7 +267,7 @@ static const char *const MODE_NAMES[MUSE_MODE_COUNT] = {
 #define MUSE_PIXEL_MAX_PX 512   /* muse_pixel_set_size's cap */
 #define WIDE_TOP 38             /* wide face: under the status row (a 16 px label at y=22) */
 #define WIDE_BOTTOM_MARGIN 22   /* ... and above the page dots */
-#define MUSE_PX_H_MAX 64        /* most grid rows a renderer may use (the wide one has 56 at most)
+#define MUSE_PX_H_MAX 112       /* most grid rows a renderer may use (the wide one has 112 at most)
  */
 #define DIRTY_RECTS_MAX 8       /* with the meter and labels, well inside LVGL's 32 areas */
 #define DIRTY_MERGE_PX 2048     /* pixels that cost about one walk of the widget tree */
