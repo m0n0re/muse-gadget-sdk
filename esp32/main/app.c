@@ -2249,9 +2249,15 @@ static cJSON *on_ws_command(
         // Read-only query (not poked above): the voice-speak policy lives on the device.
         cJSON *result = cJSON_CreateObject();
         cJSON_AddBoolToObject(result, "ok", true);
-        cJSON_AddBoolToObject(result, "enabled", muse_settings_notify_speak());
-        cJSON_AddNumberToObject(result, "from_min", muse_settings_notify_from_min());
-        cJSON_AddNumberToObject(result, "to_min", muse_settings_notify_to_min());
+        // Only ok, payload and error reach the caller: the settings go under payload.
+        cJSON *payload = cJSON_AddObjectToObject(result, "payload");
+        if (!payload) {
+            cJSON_Delete(result);
+            return command_error("failed", "out of memory");
+        }
+        cJSON_AddBoolToObject(payload, "enabled", muse_settings_notify_speak());
+        cJSON_AddNumberToObject(payload, "from_min", muse_settings_notify_from_min());
+        cJSON_AddNumberToObject(payload, "to_min", muse_settings_notify_to_min());
         ESP_LOGI(TAG, "notify.get: enabled %d from %d to %d", muse_settings_notify_speak(),
                  muse_settings_notify_from_min(), muse_settings_notify_to_min());
         return result;
