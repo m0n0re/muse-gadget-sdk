@@ -628,14 +628,23 @@ static void follow_end(const char *why)
     ESP_LOGI(TAG, "follow-up: window closed (%s)", why);
 }
 
-enum { FOLLOW_WAIT, FOLLOW_SPEECH, FOLLOW_OVER };
+enum { FOLLOW_WAIT, FOLLOW_SPEECH, FOLLOW_OVER, FOLLOW_WAKE };
 
 /* One idle chunk (s_chunk) while the window is open. FOLLOW_OVER: it closed, and
  * *idle says whether this task should put the face back to idle. */
 static int follow_poll(bool *idle)
 {
     *idle = false;
-    (void)muse_wake_take();   /* the window already listens: a detection here has nothing to start */
+    /* Regression fix: this used to discard the detection (`(void)muse_wake_take()`). The window is
+     * open after every voice-note reply (10 s, up to 5 in a row), and the loop only calls
+     * muse_wake_take() when no window is open, so a "Hi Muse" inside it was eaten here: no
+     * "wake word: starting" log, no listen pose, and the face/LED stayed on the window's LISTENING
+     * look, so the wake word seemed dead. A detection now closes the window and starts an ordinary
+     * wake note (FOLLOW_WAKE), as when idle. */
+    if (muse_wake_take()) {
+        follow_end("wake word");
+        return FOLLOW_WAKE;
+    }
     muse_state_poke();        /* a conversation is activity, as in a reply: don't auto-sleep */
     if (atomic_load(&s_shutdown) || muse_voice_in_call() || muse_state_mode(NULL) != MUSE_MODE_LISTENING) {
         follow_end("yielded");   /* something else has the device */
@@ -1484,7 +1493,8 @@ static void voice_task(void *arg)
                         if (to_idle) go_idle("");
                         continue;
                     }
-                    follow = true;
+                    follow = r == FOLLOW_SPEECH;   /* FOLLOW_WAKE: a normal wake note, below */
+                    if (atomic_load(&s_shutdown)) continue;
                 } else if (!muse_wake_take() || atomic_load(&s_shutdown)) {
                     continue;
                 }
