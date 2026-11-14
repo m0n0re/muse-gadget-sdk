@@ -1258,6 +1258,16 @@ static void build_screen(void)
     s_state_lbl = make_label(face, s_small ? &lv_font_unscii_8 : &lv_font_unscii_16, 0xffffff);
     lv_obj_set_style_text_letter_space(s_state_lbl, s_small ? 1 : 2, 0);
     lv_obj_align(s_state_lbl, LV_ALIGN_TOP_MID, 0, muse_board->rim_controls ? 64 : s_small ? 22 : 40 + s_dy);
+    if (s_avatar_wide) {
+        /* Wide header: the state sits in the top middle on the icon row's centre
+         * (y=14), a 16 px box from y=6, between the Wi-Fi/Bluetooth icons on the
+         * left (end by x~66) and the battery on the right (from x~280). A shorter
+         * font is centred in the box by update_status(). */
+        lv_obj_set_size(s_state_lbl, 180, lv_font_get_line_height(&lv_font_unscii_16));
+        lv_label_set_long_mode(s_state_lbl, LV_LABEL_LONG_MODE_DOTS);
+        lv_obj_set_style_text_align(s_state_lbl, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_align(s_state_lbl, LV_ALIGN_TOP_MID, 0, 14 - lv_font_get_line_height(&lv_font_unscii_16) / 2);
+    }
     lv_obj_set_flag(s_state_lbl, LV_OBJ_FLAG_HIDDEN, s_small && !s_tall && s_h < 200);
 
     /* This gadget's own name, dim under the state while it's unpaired: with
@@ -1916,7 +1926,13 @@ static void update_status(muse_mode_t mode, float now)
 
     if (name != s_shown_name) {
         const char *shown = muse_lang_status(name);
-        lv_obj_set_style_text_font(s_state_lbl, muse_lang_label_font(shown, s_small ? &lv_font_unscii_8 : &lv_font_unscii_16), 0);
+        const lv_font_t *state_font = muse_lang_label_font(shown, s_small ? &lv_font_unscii_8 : &lv_font_unscii_16);
+        lv_obj_set_style_text_font(s_state_lbl, state_font, 0);
+        if (s_avatar_wide) {   /* keep the text centred on y=14 in its 16 px box */
+            int box = lv_font_get_line_height(&lv_font_unscii_16);
+            int pad = (box - lv_font_get_line_height(state_font)) / 2;
+            lv_obj_set_style_pad_top(s_state_lbl, pad > 0 ? pad : 0, 0);
+        }
         lv_label_set_text(s_state_lbl, shown);
         s_shown_name = name;
     }
