@@ -265,7 +265,7 @@ static const char *const MODE_NAMES[MUSE_MODE_COUNT] = {
 #define STRIPS LV_DRAW_SW_DRAW_UNIT_CNT
 
 #define MUSE_PIXEL_MAX_PX 512   /* muse_pixel_set_size's cap */
-#define WIDE_TOP 38             /* wide face: under the status row (a 16 px label at y=22) */
+#define WIDE_TOP 24             /* wide face: 2 px under the header row (ends at y=22) */
 #define WIDE_BOTTOM_MARGIN 22   /* ... and above the page dots */
 #define MUSE_PX_H_MAX 112       /* most grid rows a renderer may use (the wide one has 112 at most)
  */
