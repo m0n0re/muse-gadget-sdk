@@ -1238,10 +1238,20 @@ static void build_screen(void)
     lv_obj_set_flex_flow(status, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(status, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_pad_column(status, s_small ? 4 : 8, 0);
-    lv_obj_align(status, LV_ALIGN_TOP_MID, 0, muse_board->rim_controls ? 40 : s_small ? 1 : 20 + s_dy);
     s_wifi_icon = make_label(status, &lv_font_montserrat_14, COLOR_DIM);
     s_ble_icon = make_label(status, &lv_font_montserrat_14, COLOR_DIM);
-    s_power_lbl = make_label(status, &lv_font_unscii_8, COLOR_DIM);
+    if (s_avatar_wide) {
+        /* Wide-avatar header in three parts: Wi-Fi and Bluetooth right of the mic
+         * (talk_hint: top left, 12 px, y=8..20, so centred on y=14), the state
+         * label in the middle, the battery in the top right corner. */
+        const muse_button_hint_t *t = &muse_board->talk_hint;
+        lv_obj_align(status, LV_ALIGN_TOP_LEFT, t->x + 12 + 6, t->y + 6 - 7);
+        s_power_lbl = make_label(face, &lv_font_unscii_8, COLOR_DIM);
+        lv_obj_align(s_power_lbl, LV_ALIGN_TOP_RIGHT, -t->x, t->y + 6 - 4);
+    } else {
+        lv_obj_align(status, LV_ALIGN_TOP_MID, 0, muse_board->rim_controls ? 40 : s_small ? 1 : 20 + s_dy);
+        s_power_lbl = make_label(status, &lv_font_unscii_8, COLOR_DIM);
+    }
 
     /* The compact layout leaves the state to the avatar and the caption,
      * unless the screen is tall enough to fit it in small type above Muse. */
@@ -1508,7 +1518,8 @@ static void build_overlays(void)
         lv_obj_set_style_bg_opa(d, LV_OPA_COVER, 0);
         lv_obj_set_style_bg_color(d, lv_color_hex(COLOR_DOT_OFF), 0);
         lv_obj_remove_flag(d, LV_OBJ_FLAG_CLICKABLE);
-        lv_obj_align(d, LV_ALIGN_BOTTOM_MID, i ? 8 : -8, -14);
+        /* The wide face ends at y=218: a 2 px gap above the dots (8 px tall, so -12 puts them at y=220..228 on 240). */
+        lv_obj_align(d, LV_ALIGN_BOTTOM_MID, i ? 8 : -8, s_avatar_wide ? -12 : -14);
         s_dots[i] = d;
     }
 
