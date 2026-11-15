@@ -1636,10 +1636,28 @@ bool muse_ui_dark(void)
     return s_dark;
 }
 
-/* Returns true while asleep (skip rendering). */
+/* Second stage of the avatar's sleep: once MUSE_MODE_SLEEP has lasted this long,
+ * the screen goes dark too. Display only: muse_state_set_asleep() is not touched,
+ * so voice, Wi-Fi and Link keep running, and any way out of MUSE_MODE_SLEEP
+ * (poke, wake word, button, tap, a spoken reply) brings the screen back. */
+#define SCREEN_OFF_AFTER_SLEEP_MIN 5
+
+/* Returns true while the screen is dark (skip rendering). */
 static bool update_sleep(void)
 {
-    bool asleep = muse_state_asleep();
+    static bool s_avatar_dark;
+    float mode_secs;
+    bool avatar_dark = muse_state_mode(&mode_secs) == MUSE_MODE_SLEEP
+                       && mode_secs > SCREEN_OFF_AFTER_SLEEP_MIN * 60.0f;
+    if (avatar_dark != s_avatar_dark) {
+        s_avatar_dark = avatar_dark;
+        if (avatar_dark) {
+            ESP_LOGI(TAG, "screen off: avatar sleep > %d min", SCREEN_OFF_AFTER_SLEEP_MIN);
+        } else {
+            ESP_LOGI(TAG, "screen on: avatar sleep ended");
+        }
+    }
+    bool asleep = muse_state_asleep() || avatar_dark;
     if (asleep && !s_dark) {
         muse_menu_close();
         apply_brightness(0);
