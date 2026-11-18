@@ -272,6 +272,7 @@ static void idle_capture(void)
     /* Idle is the only time the wake word borrows the microphone: it is fed
      * the chunk this task just read, never read from the audio input itself. */
     muse_wake_feed(s_chunk, MUSE_AUDIO_CHUNK);
+    muse_audio_note_prepare(s_chunk, MUSE_AUDIO_CHUNK);   /* after the wake feed: that stays untouched */
     pre_put_preroll();
 }
 
@@ -409,6 +410,9 @@ static bool record(char *why, size_t cap)
             break;
         }
         muse_state_set_level(muse_audio_level(s_chunk, MUSE_AUDIO_CHUNK));
+        /* Speech detection below keeps judging the level it always did. */
+        float raw_db = s_wake_note ? muse_audio_dbfs(s_chunk, MUSE_AUDIO_CHUNK) : 0.0f;
+        muse_audio_note_prepare(s_chunk, MUSE_AUDIO_CHUNK);
 #if MUSE_LOW_MEM
         if (s_pre_fill) {
             /* Keep new input behind the opening backlog until it drains. */
@@ -449,7 +453,7 @@ static bool record(char *why, size_t cap)
             muse_state_set_caption(s_live ? "LISTENING %.1fs" : "RECORDING %.1fs", (double)n / MUSE_AUDIO_RATE);
         }
         if (s_wake_note) {
-            float db = muse_audio_dbfs(s_chunk, MUSE_AUDIO_CHUNK);
+            float db = raw_db;
             wfloor = db < wfloor ? db : wfloor + 0.02f;
             bool loud_now = n > WAKE_NOTE_IGNORE_FRAMES && db > (wfloor + 10.0f > -48.0f ? wfloor + 10.0f : -48.0f);
             loud = loud_now ? loud + 1 : 0;
@@ -805,8 +809,9 @@ static note_result_t note_held(bool wake, bool barge_in)
             settle--;
             continue;
         }
-        pre_put();
         if (!wake) muse_state_set_level(muse_audio_level(s_chunk, MUSE_AUDIO_CHUNK));
+        muse_audio_note_prepare(s_chunk, MUSE_AUDIO_CHUNK);
+        pre_put();
         /* Conservatively exclude a block whose read overlapped release. */
         if (xQueuePeek(s_queue, &ev, 0) != pdTRUE) captured += MUSE_AUDIO_CHUNK;
     }
@@ -834,6 +839,7 @@ static bool ptt_held_on_waking(void)
         if (muse_audio_read(s_chunk, MUSE_AUDIO_CHUNK) != ESP_OK) {
             vTaskDelay(pdMS_TO_TICKS(20));
         } else if (xQueuePeek(s_queue, &ev, 0) != pdTRUE) {
+            muse_audio_note_prepare(s_chunk, MUSE_AUDIO_CHUNK);
             pre_put_preroll();   /* still held after the blocking read */
         }
     }
@@ -1399,7 +1405,10 @@ static void pose_settle(bool keep_audio)
         }
         if (atomic_load(&s_shutdown)) break;
         if (muse_audio_read(s_chunk, MUSE_AUDIO_CHUNK) != ESP_OK) vTaskDelay(pdMS_TO_TICKS(10));
-        else if (keep_audio) pre_put();
+        else if (keep_audio) {
+            muse_audio_note_prepare(s_chunk, MUSE_AUDIO_CHUNK);
+            pre_put();
+        }
     }
     int ms = (int)((esp_timer_get_time() - t0) / 1000);
     if (timeout) ESP_LOGW(TAG, "pose wait: gave up after %d ms (limit %d), recording anyway", ms, POSE_WAIT_MAX_MS);

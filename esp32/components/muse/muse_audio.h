@@ -49,6 +49,11 @@ void muse_audio_loopback_test(int volume);
 /* Blocking read of `frames` mono samples (mic pair mixed down). */
 esp_err_t muse_audio_read(int16_t *mono, size_t frames);
 
+/* Voice notes only: overwrites `mono` (the chunk just read, <= MUSE_AUDIO_CHUNK
+ * frames) with the same audio taken before the digital gain, normalised by a
+ * soft AGC + limiter. Wake-word feed must use the muse_audio_read output as is. */
+void muse_audio_note_prepare(int16_t *mono, size_t frames);
+
 /* Blocking write of `frames` mono samples to the speaker. */
 esp_err_t muse_audio_write(const int16_t *mono, size_t frames);
 

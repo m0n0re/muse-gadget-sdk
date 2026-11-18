@@ -55,6 +55,9 @@ static float s_mic_scale = 1.0f;
  * in muse_audio_read (the one path wake word, notes and calls all read). */
 static float s_dig_scale = 1.0f;
 static float s_hpf_x1, s_hpf_y1;
+/* The last read chunk before the digital gain (codec PGA only), kept so the
+ * voice-note path can normalise from it instead of the saturated signal. */
+static int16_t s_pre_dig[MUSE_AUDIO_CHUNK];
 /* Digital gain above 100 % volume, applied to every sample written to the
  * speaker (muse_audio_write and the loopback tone). */
 static float s_out_scale = 1.0f;
@@ -440,6 +443,9 @@ esp_err_t muse_audio_read(int16_t *mono, size_t frames)
             float y = s_hpf_a * (s_hpf_y1 + x - s_hpf_x1);
             s_hpf_x1 = x;
             s_hpf_y1 = y;
+            if (i < MUSE_AUDIO_CHUNK) {
+                s_pre_dig[i] = (int16_t)(y > 32767 ? 32767 : (y < -32768 ? -32768 : y));
+            }
             if (!direct) y *= s_dig_scale;   /* direct mics already scaled in full */
             mono[i] = (int16_t)(y > 32767 ? 32767 : (y < -32768 ? -32768 : y));
         }
@@ -447,6 +453,61 @@ esp_err_t muse_audio_read(int16_t *mono, size_t frames)
         frames -= n;
     }
     return ESP_OK;
+}
+
+/* Voice-note AGC + soft limiter, in place, one chunk at a time.
+ *
+ * Why: the note path used to send muse_audio_read's output as is. At 45 dB the
+ * digital stage (x2.8) saturates int16, and level swung per recording (peaks
+ * 0.06..1.0 measured), so transcription failed at both ends.
+ * Input is the chunk before the digital gain (PGA only), so nothing was clipped.
+ *
+ * Target: speech peaks about 0.6 FS (inside the 0.5..0.8 aim). A peak envelope
+ * (instant attack, ~1.5 s release) sets the gain; gain drops at once and rises
+ * at most 3 % per 20 ms chunk (~4x/s), so words don't pump.
+ * Range: floor 1x (never below PGA-only), ceiling = user's digital stage x8
+ * (+18 dB) so the Sound-page gain still sets the base sensitivity.
+ * Silence guard: envelope under -44 dBFS holds the gain (no noise lift).
+ * Limiter: above 0.7 FS a tanh knee eases toward 0.95 FS; no hard clip. */
+#define AGC_TARGET   (0.60f * 32768.0f)
+#define AGC_FLOOR    150.0f      /* ~ -47 dBFS peak: below this it is room noise */
+#define AGC_RELEASE  0.987f      /* per 20 ms: envelope falls ~1.5 s to 1/e */
+#define AGC_RISE     1.03f
+#define AGC_HEADROOM 8.0f
+#define LIM_KNEE     (0.70f * 32768.0f)
+#define LIM_CEIL     (0.95f * 32768.0f)
+
+void muse_audio_note_prepare(int16_t *mono, size_t frames)
+{
+    static float env, gain;
+    if (frames > MUSE_AUDIO_CHUNK) frames = MUSE_AUDIO_CHUNK;
+    float base = s_dig_scale < 1.0f ? 1.0f : s_dig_scale;
+    if (gain == 0.0f) gain = base;
+    float peak = 0;
+    for (size_t i = 0; i < frames; i++) {
+        float a = fabsf((float)s_pre_dig[i]);
+        if (a > peak) peak = a;
+    }
+    env = peak > env ? peak : env * AGC_RELEASE;
+    float want = gain;
+    if (env >= AGC_FLOOR) {
+        want = AGC_TARGET / env;
+        if (want < 1.0f) want = 1.0f;
+        if (want > base * AGC_HEADROOM) want = base * AGC_HEADROOM;
+    }
+    float from = gain;
+    if (want < gain) gain = from = want;           /* loud: drop immediately */
+    else gain = want > gain * AGC_RISE ? gain * AGC_RISE : want;
+    for (size_t i = 0; i < frames; i++) {
+        float g = from + (gain - from) * ((float)(i + 1) / (float)frames);
+        float y = (float)s_pre_dig[i] * g;
+        float a = fabsf(y);
+        if (a > LIM_KNEE) {
+            a = LIM_KNEE + (LIM_CEIL - LIM_KNEE) * tanhf((a - LIM_KNEE) / (LIM_CEIL - LIM_KNEE));
+            y = y < 0 ? -a : a;
+        }
+        mono[i] = (int16_t)y;
+    }
 }
 
 esp_err_t muse_audio_write(const int16_t *mono, size_t frames)
