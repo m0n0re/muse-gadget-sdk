@@ -25,6 +25,9 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#if CONFIG_MUSE_WAKE_WORD_HI_MUSE
+#include "esp_ns.h"   /* esp-sr stand-alone noise suppression (no AFE pipeline) */
+#endif
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
@@ -477,15 +480,44 @@ esp_err_t muse_audio_read(int16_t *mono, size_t frames)
 #define LIM_KNEE     (0.70f * 32768.0f)
 #define LIM_CEIL     (0.95f * 32768.0f)
 
+/* Stationary-noise suppression (esp-sr WebRTC NS, 10 ms frames) ahead of the AGC, voice notes only.
+ * Lazily created on first use (one small instance, no large resident buffers); if it can't be
+ * created the note path just runs without it. The wake-word feed never goes through here. */
+static int16_t s_ns_out[MUSE_AUDIO_CHUNK];
+static const int16_t *note_denoise(size_t frames)
+{
+#if CONFIG_MUSE_WAKE_WORD_HI_MUSE
+    static ns_handle_t ns;
+    static bool tried;
+    if (!ns && !tried) {
+        tried = true;
+        size_t before = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+        ns = ns_create(10);
+        ESP_LOGI(TAG, "note noise suppression %s (internal RAM -%d B)", ns ? "on" : "unavailable",
+                 (int)(before - heap_caps_get_free_size(MALLOC_CAP_INTERNAL)));
+    }
+    if (ns && frames == MUSE_AUDIO_CHUNK) {
+        const size_t f = MUSE_AUDIO_RATE / 100;   /* 10 ms */
+        for (size_t o = 0; o + f <= frames; o += f) {
+            ns_process(ns, s_pre_dig + o, s_ns_out + o);
+        }
+        return s_ns_out;
+    }
+#endif
+    (void)frames;
+    return s_pre_dig;
+}
+
 void muse_audio_note_prepare(int16_t *mono, size_t frames)
 {
     static float env, gain;
     if (frames > MUSE_AUDIO_CHUNK) frames = MUSE_AUDIO_CHUNK;
+    const int16_t *src = note_denoise(frames);
     float base = s_dig_scale < 1.0f ? 1.0f : s_dig_scale;
     if (gain == 0.0f) gain = base;
     float peak = 0;
     for (size_t i = 0; i < frames; i++) {
-        float a = fabsf((float)s_pre_dig[i]);
+        float a = fabsf((float)src[i]);
         if (a > peak) peak = a;
     }
     env = peak > env ? peak : env * AGC_RELEASE;
@@ -500,7 +532,7 @@ void muse_audio_note_prepare(int16_t *mono, size_t frames)
     else gain = want > gain * AGC_RISE ? gain * AGC_RISE : want;
     for (size_t i = 0; i < frames; i++) {
         float g = from + (gain - from) * ((float)(i + 1) / (float)frames);
-        float y = (float)s_pre_dig[i] * g;
+        float y = (float)src[i] * g;
         float a = fabsf(y);
         if (a > LIM_KNEE) {
             a = LIM_KNEE + (LIM_CEIL - LIM_KNEE) * tanhf((a - LIM_KNEE) / (LIM_CEIL - LIM_KNEE));

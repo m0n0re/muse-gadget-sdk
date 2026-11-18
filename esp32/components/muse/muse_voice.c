@@ -101,10 +101,14 @@ static bool s_wake_cancel;
  * conversation but silence (timeout), a tap, or FOLLOW_MAX windows in a row. */
 #define FOLLOW_WINDOW_US (10LL * 1000000)
 #define FOLLOW_MAX 5
+/* A follow-up window starts a note only on voice-like energy that lasts this long (~260 ms), not
+ * a momentary level jump; a recording with less speech than this in total is dropped unsent. */
+#define FOLLOW_SPEECH_CHUNKS (260000 / CHUNK_US)
 static int64_t s_follow_until_us;   /* 0: no window open */
 static int s_follow_n;              /* windows opened since the last wake word or press */
 static float s_follow_floor;        /* noise floor tracked while the window waits */
 static size_t s_follow_loud, s_follow_age;
+static float s_chunk_db;            /* idle_capture: level of the chunk as read, before the note AGC/NS */
 static bool s_follow_note;          /* record(): speech was already heard, floor carried over */
 static bool s_reply_ok;             /* hatch_reply() played a whole reply, no error */
 static volatile bool s_monitor;
@@ -272,6 +276,9 @@ static void idle_capture(void)
     /* Idle is the only time the wake word borrows the microphone: it is fed
      * the chunk this task just read, never read from the audio input itself. */
     muse_wake_feed(s_chunk, MUSE_AUDIO_CHUNK);
+    /* The follow-up window judges this raw level: the AGC lifts a quiet room toward the target
+     * over a few seconds, which looked like speech starting. */
+    if (s_follow_until_us) s_chunk_db = muse_audio_dbfs(s_chunk, MUSE_AUDIO_CHUNK);
     muse_audio_note_prepare(s_chunk, MUSE_AUDIO_CHUNK);   /* after the wake feed: that stays untouched */
     pre_put_preroll();
 }
@@ -403,6 +410,8 @@ static bool record(char *why, size_t cap)
     float wfloor = 0.0f;
     bool spoke = s_follow_note;
     size_t loud = 0, quiet = 0;
+    size_t voiced = s_follow_note ? FOLLOW_SPEECH_CHUNKS : 0;   /* chunks of speech heard (the window's run counts) */
+    size_t total = 0;
     if (s_follow_note) wfloor = s_follow_floor;
     s_wake_cancel = false;
     while (n + MUSE_AUDIO_CHUNK <= stop_at) {
@@ -457,11 +466,20 @@ static bool record(char *why, size_t cap)
             wfloor = db < wfloor ? db : wfloor + 0.02f;
             bool loud_now = n > WAKE_NOTE_IGNORE_FRAMES && db > (wfloor + 10.0f > -48.0f ? wfloor + 10.0f : -48.0f);
             loud = loud_now ? loud + 1 : 0;
+            if (loud_now) voiced++;
+            total++;
             if (loud >= WAKE_NOTE_SPEECH_CHUNKS) spoke = true;
             if (spoke) {
                 quiet = loud_now ? 0 : quiet + 1;
                 if (quiet >= WAKE_NOTE_SILENCE_CHUNKS) {
                     ESP_LOGI(TAG, "wake note: silence, sending");
+                    stop_at = n;
+                }
+                /* A follow-up that never goes quiet is a steady noise, not a person. */
+                if (s_follow_note && total >= 150 && voiced * 100 > (total + FOLLOW_SPEECH_CHUNKS) * 95) {
+                    ESP_LOGI(TAG, "follow-up: steady noise, no speech");
+                    voiced = 0;
+                    s_wake_cancel = true;
                     stop_at = n;
                 }
             } else if (n >= WAKE_NOTE_NO_SPEECH_FRAMES) {
@@ -481,6 +499,10 @@ static bool record(char *why, size_t cap)
     }
     take_pre(&st, s_pre_fill);
     muse_state_set_level(0);
+    if (s_follow_note && !s_wake_cancel && voiced < FOLLOW_SPEECH_CHUNKS + 6) {   /* the window's run, plus 120 ms more of it */
+        ESP_LOGI(TAG, "follow-up: no speech in the recording (%u chunks), dropped", (unsigned)voiced);
+        s_wake_cancel = true;
+    }
 
     char tail[160];
     int tl = 0;
@@ -660,13 +682,14 @@ static int follow_poll(bool *idle)
         return FOLLOW_OVER;
     }
     if (s_settle > 0) return FOLLOW_WAIT;   /* the reply's own tail */
-    float db = muse_audio_dbfs(s_chunk, MUSE_AUDIO_CHUNK);
+    float db = s_chunk_db;
     s_follow_floor = db < s_follow_floor ? db : s_follow_floor + 0.02f;
     s_follow_age += MUSE_AUDIO_CHUNK;
     bool loud_now = s_follow_age > WAKE_NOTE_IGNORE_FRAMES &&
                     db > (s_follow_floor + 10.0f > -48.0f ? s_follow_floor + 10.0f : -48.0f);
-    s_follow_loud = loud_now ? s_follow_loud + 1 : 0;
-    if (s_follow_loud < WAKE_NOTE_SPEECH_CHUNKS) return FOLLOW_WAIT;
+    /* Syllable gaps cost two chunks each, a longer lull restarts the count. */
+    s_follow_loud = loud_now ? s_follow_loud + 1 : (s_follow_loud > 2 ? s_follow_loud - 2 : 0);
+    if (s_follow_loud < FOLLOW_SPEECH_CHUNKS) return FOLLOW_WAIT;
     ESP_LOGI(TAG, "follow-up: speech detected (%d/%d), recording", s_follow_n, FOLLOW_MAX);
     s_follow_until_us = 0;   /* the run goes on: s_follow_n is kept */
     return FOLLOW_SPEECH;
@@ -1630,6 +1653,7 @@ static void voice_task(void *arg)
         note_toggled(false);
         if (s_wake_cancel) {
             s_wake_cancel = false;
+            s_follow_n = 0;   /* a dropped follow-up ends the run of follow-ups */
             if (s_live) muse_hatch_turn_cancel();
             s_live = false;
             drop_rec();
