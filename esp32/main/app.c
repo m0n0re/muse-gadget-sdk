@@ -2263,11 +2263,17 @@ static cJSON *on_ws_command(
         return result;
     }
     if (strcmp(command, "voice.get") == 0) {
-        // Read-only query (not poked above), shaped like notify.get (the wrapper puts these under payload).
+        // Read-only query (not poked above), shaped like notify.get.
         cJSON *result = cJSON_CreateObject();
         cJSON_AddBoolToObject(result, "ok", true);
-        cJSON_AddBoolToObject(result, "wake_word", muse_settings_wake_word());
-        cJSON_AddBoolToObject(result, "follow_up", muse_settings_follow_up());
+        // Only ok, payload and error reach the caller: the settings go under payload.
+        cJSON *payload = cJSON_AddObjectToObject(result, "payload");
+        if (!payload) {
+            cJSON_Delete(result);
+            return command_error("failed", "out of memory");
+        }
+        cJSON_AddBoolToObject(payload, "wake_word", muse_settings_wake_word());
+        cJSON_AddBoolToObject(payload, "follow_up", muse_settings_follow_up());
         ESP_LOGI(TAG, "voice.get: wake_word %d follow_up %d", muse_settings_wake_word(), muse_settings_follow_up());
         return result;
     }
