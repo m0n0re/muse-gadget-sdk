@@ -43,6 +43,8 @@ static struct {
     bool wifi_on;
     bool ble_on;
     bool notify_speak;
+    bool wake_word;
+    bool follow_up;
     uint16_t notify_from;
     uint16_t notify_to;
     uint16_t sleep_after_min;   /* avatar sleep after this many idle minutes; 0 = never */
@@ -60,6 +62,8 @@ static struct {
     .text_size = MUSE_TEXT_MEDIUM,
     .wifi_on = true,
     .notify_speak = true,
+    .wake_word = true,
+    .follow_up = true,
     .notify_from = 540,     /* 9:00 */
     .notify_to = 1320,      /* 22:00 */
     .sleep_after_min = 10,
@@ -150,6 +154,12 @@ esp_err_t muse_settings_init(void)
     if (nvs_get_u8(s_nvs, "notify_speak", &b) == ESP_OK) {
         s.notify_speak = b;
     }
+    if (nvs_get_u8(s_nvs, "wake_word", &b) == ESP_OK) {
+        s.wake_word = b;
+    }
+    if (nvs_get_u8(s_nvs, "follow_up", &b) == ESP_OK) {
+        s.follow_up = b;
+    }
     nvs_get_u16(s_nvs, "notify_from", &s.notify_from);
     nvs_get_u16(s_nvs, "notify_to", &s.notify_to);
     nvs_get_u16(s_nvs, "sleep_after", &s.sleep_after_min);
@@ -189,6 +199,8 @@ int muse_settings_text_size(void) { return s.text_size; }
 bool muse_settings_wifi_on(void) { return s.wifi_on; }
 bool muse_settings_ble_on(void) { return s.ble_on; }
 bool muse_settings_notify_speak(void) { return s.notify_speak; }
+bool muse_settings_wake_word(void) { return s.wake_word; }
+bool muse_settings_follow_up(void) { return s.follow_up; }
 int muse_settings_notify_from_min(void) { return s.notify_from; }
 int muse_settings_sleep_after_min(void) { return s.sleep_after_min; }
 int muse_settings_notify_to_min(void) { return s.notify_to; }
@@ -290,6 +302,18 @@ void muse_settings_set_sleep_after_min(int min)
     s.sleep_after_min = clampi(min, 0, 1440);
     nvs_set_u16(s_nvs, "sleep_after", s.sleep_after_min);
     nvs_commit(s_nvs);
+}
+
+void muse_settings_set_wake_word(bool on)
+{
+    s.wake_word = on;
+    save_u8("wake_word", on);
+}
+
+void muse_settings_set_follow_up(bool on)
+{
+    s.follow_up = on;
+    save_u8("follow_up", on);
 }
 
 void muse_settings_set_notify_from_min(int min)

@@ -667,7 +667,7 @@ static int follow_poll(bool *idle)
      * "wake word: starting" log, no listen pose, and the face/LED stayed on the window's LISTENING
      * look, so the wake word seemed dead. A detection now closes the window and starts an ordinary
      * wake note (FOLLOW_WAKE), as when idle. */
-    if (muse_wake_take()) {
+    if (muse_wake_take() && muse_settings_wake_word()) {   /* off: consumed and ignored */
         follow_end("wake word");
         return FOLLOW_WAKE;
     }
@@ -1527,7 +1527,8 @@ static void voice_task(void *arg)
                     }
                     follow = r == FOLLOW_SPEECH;   /* FOLLOW_WAKE: a normal wake note, below */
                     if (atomic_load(&s_shutdown)) continue;
-                } else if (!muse_wake_take() || atomic_load(&s_shutdown)) {
+                } else if (!muse_wake_take() || !muse_settings_wake_word() || atomic_load(&s_shutdown)) {
+                    /* wake word off: the detection is consumed above and ignored */
                     continue;
                 }
                 /* "Hi Muse": a voice note as if the talk button were held from
@@ -1670,7 +1671,7 @@ static void voice_task(void *arg)
         pending_down = finish_note();
         pre_reset();
         if (!pending_down && s_reply_ok && !atomic_load(&s_shutdown) && s_follow_n < FOLLOW_MAX &&
-            muse_state_mode(NULL) != MUSE_MODE_OFF) {
+            muse_settings_follow_up() && muse_state_mode(NULL) != MUSE_MODE_OFF) {
             follow_open();   /* only a note's reply opens it: not speak, a camera turn or a held note */
         } else if (!pending_down && muse_state_mode(NULL) != MUSE_MODE_IDLE) {
             s_follow_n = 0;

@@ -121,7 +121,7 @@ static lv_obj_t *s_ble_sw, *s_ble_status;
 #if CONFIG_MUSE_BOARD_M5STACK_STOPWATCH && CONFIG_MUSE_REALTIME_VOICE
 static lv_obj_t *s_notes_sw;
 #endif
-static lv_obj_t *s_notify_sw, *s_notify_from_val, *s_notify_to_val, *s_sleepafter_val;
+static lv_obj_t *s_wake_sw, *s_follow_sw, *s_notify_sw, *s_notify_from_val, *s_notify_to_val, *s_sleepafter_val;
 static lv_obj_t *s_spk_sw, *s_vol_val, *s_vol_sl, *s_gain_val, *s_gain_sl, *s_bright_val, *s_bright_sl, *s_mic_bar, *s_mic_val;
 
 /* Sleep page. */
@@ -1323,6 +1323,36 @@ static const lv_font_t *jp_font(const lv_font_t *base)
 
 static void set_notify_vals(void);
 
+static void on_wake_sw(lv_event_t *e)
+{
+    muse_settings_set_wake_word(lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED));
+}
+
+static void on_follow_sw(lv_event_t *e)
+{
+    muse_settings_set_follow_up(lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED));
+}
+
+/* A label + switch row, like the notification speech one. */
+static lv_obj_t *jp_switch_row(lv_obj_t *list, const char *name, bool on, lv_event_cb_t cb)
+{
+    lv_obj_t *c = card(list, false);
+    lv_obj_t *t = lv_label_create(c);
+    lv_obj_set_style_text_font(t, jp_font(&lv_font_montserrat_20), 0);
+    lv_obj_set_style_text_color(t, lv_color_hex(COLOR_TEXT), 0);
+    lv_label_set_text(t, name);
+    lv_obj_set_flex_grow(t, 1);
+    lv_obj_t *sw = lv_switch_create(c);
+    lv_obj_set_size(sw, wide_layout() ? 76 : stacked_rows() ? 44 : 60, wide_layout() ? 42 : s_tiny ? 24 : 32);
+    lv_obj_set_style_bg_color(sw, lv_color_hex(0x3a3358), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(sw, lv_color_hex(COLOR_ACCENT), LV_PART_INDICATOR | LV_STATE_CHECKED);
+    if (on) {
+        lv_obj_add_state(sw, LV_STATE_CHECKED);
+    }
+    lv_obj_add_event_cb(sw, cb, LV_EVENT_VALUE_CHANGED, NULL);
+    return sw;
+}
+
 static void on_notify_sw(lv_event_t *e)
 {
     muse_settings_set_notify_speak(lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED));
@@ -1457,6 +1487,10 @@ static void build_sound_page(lv_obj_t *tile)
         notify_time_row(list, "終了", 1, &s_notify_to_val);
         set_notify_vals();
     }
+
+    /* Conversation: the "Hi Muse" wake word, and listening on after a reply. */
+    s_wake_sw = jp_switch_row(list, "ウェイクワード", muse_settings_wake_word(), on_wake_sw);
+    s_follow_sw = jp_switch_row(list, "続きを聞き取り", muse_settings_follow_up(), on_follow_sw);
     if (s_vol_val) set_val(s_vol_val, "%d%%", muse_settings_volume());
     set_val(s_gain_val, "%d dB", muse_settings_mic_gain() / 3 * 3);
 }
@@ -1479,6 +1513,12 @@ static void tick_sound(void)
             lv_obj_set_state(s_notify_sw, LV_STATE_CHECKED, ns);
         }
         set_notify_vals();
+    }
+    if (s_wake_sw && muse_settings_wake_word() != lv_obj_has_state(s_wake_sw, LV_STATE_CHECKED)) {
+        lv_obj_set_state(s_wake_sw, LV_STATE_CHECKED, muse_settings_wake_word());
+    }
+    if (s_follow_sw && muse_settings_follow_up() != lv_obj_has_state(s_follow_sw, LV_STATE_CHECKED)) {
+        lv_obj_set_state(s_follow_sw, LV_STATE_CHECKED, muse_settings_follow_up());
     }
     if (muse_board->epaper) return;
     float db = muse_voice_monitor_db();

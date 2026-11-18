@@ -79,6 +79,12 @@ int muse_settings_notify_to_min(void);      /* 0..1439, default 1320 (22:00) */
 void muse_settings_set_notify_speak(bool on);
 void muse_settings_set_notify_from_min(int min);
 void muse_settings_set_notify_to_min(int min);
+/* Voice conversation: the "Hi Muse" wake word, and the follow-up window after a reply. Both default on,
+ * are read at the moment of use (not latched at boot), and the button-hold voice note is unaffected. */
+bool muse_settings_wake_word(void);
+bool muse_settings_follow_up(void);
+void muse_settings_set_wake_word(bool on);
+void muse_settings_set_follow_up(bool on);
 /* CoreS3 avatar sleep (MUSE_MODE_SLEEP): idle minutes before it starts; 0 = never, default 10.
  * Separate from muse_settings_sleep_s(), the screen-off timer. */
 int muse_settings_sleep_after_min(void);
