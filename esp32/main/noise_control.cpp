@@ -1689,6 +1689,13 @@ static char *build_register_json(void) {
                     "Read-only; does not wake the device or reset its sleep timer.",
                     nullptr, nullptr);
 
+        add_command(commands, "voice.get",
+                    "Query the voice settings: whether the wake word is "
+                    "enabled and whether follow-up listening is enabled "
+                    "(both ON/OFF). "
+                    "Read-only; does not wake the device from sleep or reset its sleep timer.",
+                    nullptr, nullptr);
+
         // The 12 RGB LEDs on the base (muse_led.c).
         cJSON *led_required = cJSON_CreateObject();
         for (const char *ch : {"r", "g", "b"}) {
