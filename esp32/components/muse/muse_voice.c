@@ -91,6 +91,11 @@ static int64_t s_press_us;
  * silence ends it (record()). No speech soon after the wake cancels it. */
 static bool s_wake_note;
 static bool s_wake_cancel;
+/* Head tap (muse_voice_tap): the voice task owns every transition, the tap only sets a request. */
+static atomic_bool s_idle_listen;   /* waiting for a wake word or press, no window, nothing playing */
+static atomic_bool s_recording;     /* record() is capturing a note */
+static atomic_bool s_tap_start;     /* start a note, as if the wake word was heard */
+static atomic_bool s_tap_end;       /* end the recording normally (send), as a release or silence would */
 #define WAKE_NOTE_IGNORE_FRAMES (MUSE_AUDIO_RATE * 4 / 10)   /* the wake word's own tail is not speech */
 #define WAKE_NOTE_NO_SPEECH_FRAMES (MUSE_AUDIO_RATE * 4)     /* no speech by now: cancel */
 #define WAKE_NOTE_SILENCE_CHUNKS (1200000 / CHUNK_US)        /* 1.2 s of silence after speech ends it */
@@ -414,6 +419,8 @@ static bool record(char *why, size_t cap)
     size_t total = 0;
     if (s_follow_note) wfloor = s_follow_floor;
     s_wake_cancel = false;
+    atomic_store(&s_tap_end, false);
+    atomic_store(&s_recording, true);
     while (n + MUSE_AUDIO_CHUNK <= stop_at) {
         if (muse_audio_read(s_chunk, MUSE_AUDIO_CHUNK) != ESP_OK) {
             break;
@@ -496,7 +503,14 @@ static bool record(char *why, size_t cap)
             released = true;
             stop_at = n + TAIL_FRAMES < MAX_FRAMES ? n + TAIL_FRAMES : MAX_FRAMES;
         }
+        /* Head tap: the normal end (same tail as a release), so the note is sent, not cancelled. */
+        if (!released && atomic_exchange(&s_tap_end, false)) {
+            ESP_LOGI(TAG, "head tap: ending the note");
+            released = true;
+            stop_at = n + TAIL_FRAMES < MAX_FRAMES ? n + TAIL_FRAMES : MAX_FRAMES;
+        }
     }
+    atomic_store(&s_recording, false);
     take_pre(&st, s_pre_fill);
     muse_state_set_level(0);
     if (s_follow_note && !s_wake_cancel && voiced < FOLLOW_SPEECH_CHUNKS + 6) {   /* the window's run, plus 120 ms more of it */
@@ -1443,7 +1457,8 @@ static void voice_task(void *arg)
     bool pending_down = false;
     muse_audio_selftest();
     for (;;) {
-        bool wake = false, wake_note = false, follow_note = false;
+        bool wake = false, wake_note = false, follow_note = false, follow_tap = false;
+        atomic_store(&s_idle_listen, false);
         if (!pending_down) {
             muse_input_event_t ev;
             bool asleep = muse_state_asleep();
@@ -1513,6 +1528,7 @@ static void voice_task(void *arg)
                 continue;
             }
             /* The 20 ms read paces this loop. */
+            atomic_store(&s_idle_listen, !s_follow_until_us);
             idle_capture();
             if (xQueueReceive(s_queue, &ev, 0) != pdTRUE) {
                 bool follow = false;
@@ -1527,15 +1543,17 @@ static void voice_task(void *arg)
                     }
                     follow = r == FOLLOW_SPEECH;   /* FOLLOW_WAKE: a normal wake note, below */
                     if (atomic_load(&s_shutdown)) continue;
-                } else if (!muse_wake_take() || !muse_settings_wake_word() || atomic_load(&s_shutdown)) {
-                    /* wake word off: the detection is consumed above and ignored */
-                    continue;
+                } else {
+                    bool tap = atomic_exchange(&s_tap_start, false);
+                    bool heard = muse_wake_take() && muse_settings_wake_word();   /* off: consumed and ignored */
+                    if ((!tap && !heard) || atomic_load(&s_shutdown)) continue;
+                    follow_tap = tap && !heard;
                 }
                 /* "Hi Muse": a voice note as if the talk button were held from
                  * now; record() ends it on silence. Not the call a tap starts. */
                 if (!follow) {
-                    ESP_LOGI(TAG, "wake word: starting a voice note");
-                    muse_state_poke_why("wake word");   /* first: leaves MUSE_MODE_SLEEP before the head lifts */
+                    ESP_LOGI(TAG, "%s: starting a voice note", follow_tap ? "head tap" : "wake word");
+                    muse_state_poke_why(follow_tap ? "head tap" : "wake word");   /* first: leaves MUSE_MODE_SLEEP before the head lifts */
                     muse_servo_listen_pose();   /* a small lift of the head; non-blocking. Recording waits for it (pose_settle) */
                     s_pre_fill = 0;   /* nothing from before the wake word belongs to the note */
                 } else {
@@ -1703,6 +1721,20 @@ esp_err_t muse_voice_start(QueueHandle_t queue)
         return ESP_ERR_NO_MEM;
     }
     return ESP_OK;
+}
+
+int muse_voice_tap(void)
+{
+    if (atomic_load(&s_shutdown) || muse_voice_in_call()) return 0;
+    if (atomic_load(&s_recording)) {
+        atomic_store(&s_tap_end, true);
+        return 2;
+    }
+    if (atomic_load(&s_idle_listen)) {
+        atomic_store(&s_tap_start, true);
+        return 1;
+    }
+    return 0;
 }
 
 void muse_voice_set_monitor(bool on)

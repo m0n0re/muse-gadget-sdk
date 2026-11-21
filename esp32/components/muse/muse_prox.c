@@ -8,6 +8,7 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "muse_state.h"
+#include "muse_voice.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/idf_additions.h"
 #include "freertos/task.h"
@@ -26,6 +27,9 @@ static i2c_master_dev_handle_t s_dev;
 static atomic_int s_ch[3];
 static atomic_bool s_ok;
 static atomic_int s_events;
+static atomic_int s_taps;
+
+#define TAP_MAX_MS 400
 
 #define PET_REPEAT_MS 500
 
@@ -119,7 +123,15 @@ static void prox_task(void *arg)
                 }
             } else if (touching) {
                 touching = false;
-                ESP_LOGI(TAG, "pet end (%lld)", (long long)((now - pet_start_us) / 1000));
+                int64_t held_ms = (now - pet_start_us) / 1000;
+                ESP_LOGI(TAG, "pet end (%lld)", (long long)held_ms);
+                if (held_ms <= TAP_MAX_MS) {
+                    atomic_fetch_add(&s_taps, 1);
+                    int r = muse_voice_tap();
+                    if (r == 1) ESP_LOGI(TAG, "tap -> note start");
+                    else if (r == 2) ESP_LOGI(TAG, "tap -> note end");
+                    else ESP_LOGI(TAG, "tap ignored");
+                }
             }
         } else if (++fails >= 20) {
             ESP_LOGE(TAG, "OUTPUT1 read keeps failing: touch disabled");
@@ -141,6 +153,7 @@ void muse_prox_start(void)
 }
 
 bool muse_prox_available(void) { return atomic_load(&s_ok); }
+int muse_prox_taps(void) { return atomic_load(&s_taps); }
 int muse_prox_events(void) { return atomic_load(&s_events); }
 int muse_prox_touch(int ch) { return (ch >= 0 && ch < 3 && atomic_load(&s_ok)) ? atomic_load(&s_ch[ch]) : 0; }
 
