@@ -24,6 +24,9 @@ CONFIG_MUSE_DEVICE_MODEL_ID="muse-gadget-m5stack-stopwatch"
 CONFIG_MUSE_DEVICE_MODEL_NAME="M5Stack StopWatch"
 CONFIG_MUSE_BOARD_M5STACK_STOPWATCH=y
 
+# Japanese captions: draw CJK glyphs (kana/kanji) instead of boxes.
+CONFIG_MUSE_CJK_FONT=y
+
 CONFIG_SPIRAM=y
 CONFIG_SPIRAM_MODE_OCT=y
 CONFIG_SPIRAM_SPEED_80M=y
