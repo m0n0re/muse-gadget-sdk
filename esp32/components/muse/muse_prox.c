@@ -28,8 +28,10 @@ static atomic_int s_ch[3];
 static atomic_bool s_ok;
 static atomic_int s_events;
 static atomic_int s_taps;
+static atomic_int s_dtaps;
 
 #define TAP_MAX_MS 400
+#define DTAP_WINDOW_MS 600   /* a first tap waits this long for a second one */
 
 #define PET_REPEAT_MS 500
 
@@ -104,12 +106,21 @@ static void prox_task(void *arg)
     int fails = 0;
     bool touching = false;
     int64_t pet_start_us = 0, last_happy_us = 0;
+    bool tap_pending = false;   /* a confirmed single tap, held back until the double-tap window is over */
+    int64_t tap_due_us = 0;
     for (;;) {
         if (rd(REG_OUTPUT1, &out, 1) == ESP_OK) {
             fails = 0;
             for (int i = 0; i < 3; i++) atomic_store(&s_ch[i], (out >> (2 * i)) & 0x03);
             bool now_touch = (out & 0x3F) != 0;
             int64_t now = esp_timer_get_time();
+            if (tap_pending && now >= tap_due_us) {   /* no second tap: the single tap's action goes now */
+                tap_pending = false;
+                int r = muse_voice_tap();
+                if (r == 1) ESP_LOGI(TAG, "tap -> note start");
+                else if (r == 2) ESP_LOGI(TAG, "tap -> note end");
+                else ESP_LOGI(TAG, "tap ignored");
+            }
             if (now_touch && !touching) {
                 touching = true;
                 pet_start_us = last_happy_us = now;
@@ -127,10 +138,15 @@ static void prox_task(void *arg)
                 ESP_LOGI(TAG, "pet end (%lld)", (long long)held_ms);
                 if (held_ms <= TAP_MAX_MS) {
                     atomic_fetch_add(&s_taps, 1);
-                    int r = muse_voice_tap();
-                    if (r == 1) ESP_LOGI(TAG, "tap -> note start");
-                    else if (r == 2) ESP_LOGI(TAG, "tap -> note end");
-                    else ESP_LOGI(TAG, "tap ignored");
+                    if (tap_pending) {   /* second tap inside the window: the held single tap is dropped */
+                        tap_pending = false;
+                        atomic_fetch_add(&s_dtaps, 1);
+                        if (muse_voice_double_tap()) ESP_LOGI(TAG, "double tap -> conversation end");
+                        else ESP_LOGI(TAG, "double tap ignored");
+                    } else {
+                        tap_pending = true;
+                        tap_due_us = now + (int64_t)DTAP_WINDOW_MS * 1000;
+                    }
                 }
             }
         } else if (++fails >= 20) {
@@ -154,6 +170,7 @@ void muse_prox_start(void)
 
 bool muse_prox_available(void) { return atomic_load(&s_ok); }
 int muse_prox_taps(void) { return atomic_load(&s_taps); }
+int muse_prox_dtaps(void) { return atomic_load(&s_dtaps); }
 int muse_prox_events(void) { return atomic_load(&s_events); }
 int muse_prox_touch(int ch) { return (ch >= 0 && ch < 3 && atomic_load(&s_ok)) ? atomic_load(&s_ch[ch]) : 0; }
 

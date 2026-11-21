@@ -95,6 +95,9 @@ static bool s_wake_cancel;
 static atomic_bool s_idle_listen;   /* waiting for a wake word or press, no window, nothing playing */
 static atomic_bool s_recording;     /* record() is capturing a note */
 static atomic_bool s_tap_start;     /* start a note, as if the wake word was heard */
+static atomic_bool s_dtap;          /* double tap: end the conversation (discard the note / cut the reply / close the window) */
+static atomic_bool s_replying;      /* hatch_reply() is running */
+static bool s_dtap_stop;            /* the last reply was cut by a double tap: back to idle, no follow-up, no happy face */
 static atomic_bool s_tap_end;       /* end the recording normally (send), as a release or silence would */
 #define WAKE_NOTE_IGNORE_FRAMES (MUSE_AUDIO_RATE * 4 / 10)   /* the wake word's own tail is not speech */
 #define WAKE_NOTE_NO_SPEECH_FRAMES (MUSE_AUDIO_RATE * 4)     /* no speech by now: cancel */
@@ -420,6 +423,7 @@ static bool record(char *why, size_t cap)
     if (s_follow_note) wfloor = s_follow_floor;
     s_wake_cancel = false;
     atomic_store(&s_tap_end, false);
+    atomic_store(&s_dtap, false);
     atomic_store(&s_recording, true);
     while (n + MUSE_AUDIO_CHUNK <= stop_at) {
         if (muse_audio_read(s_chunk, MUSE_AUDIO_CHUNK) != ESP_OK) {
@@ -503,6 +507,13 @@ static bool record(char *why, size_t cap)
             released = true;
             stop_at = n + TAIL_FRAMES < MAX_FRAMES ? n + TAIL_FRAMES : MAX_FRAMES;
         }
+        /* Head double tap: the note is discarded through the wake-note cancel path (drop_rec, go_idle below). */
+        if (atomic_exchange(&s_dtap, false)) {
+            ESP_LOGI(TAG, "head double tap: note discarded");
+            s_wake_cancel = true;
+            s_dtap_stop = true;
+            break;
+        }
         /* Head tap: the normal end (same tail as a release), so the note is sent, not cancelled. */
         if (!released && atomic_exchange(&s_tap_end, false)) {
             ESP_LOGI(TAG, "head tap: ending the note");
@@ -539,7 +550,7 @@ static void go_idle(const char *caption);
  * true if interrupted by a new press. *delivered: the VM has the note.
  * incoming: a reply to an earlier request, which nobody pressed for.
  */
-static bool hatch_reply(bool *delivered, bool incoming)
+static bool hatch_reply_run(bool *delivered, bool incoming)
 {
     muse_state_set_mode(MUSE_MODE_THINKING);
     /* Until there's a transcript or reply; a late reply has no note to send. */
@@ -591,6 +602,14 @@ static bool hatch_reply(bool *delivered, bool incoming)
                 break;
             }
         }
+        if (atomic_exchange(&s_dtap, false)) {
+            ESP_LOGI(TAG, "head double tap: reply cut off");
+            muse_hatch_turn_cancel();
+            muse_state_set_level(0);
+            *delivered = true;   /* the conversation is over: nothing is kept for a later send */
+            s_dtap_stop = true;
+            return false;        /* s_reply_ok stays false: no follow-up window */
+        }
         if (got_event(MUSE_PTT_DOWN)) {
             ESP_LOGI(TAG, "reply interrupted");
             muse_hatch_turn_cancel();
@@ -633,6 +652,15 @@ static bool hatch_reply(bool *delivered, bool incoming)
     }
     s_reply_ok = true;
     return false;
+}
+
+static bool hatch_reply(bool *delivered, bool incoming)
+{
+    atomic_store(&s_dtap, false);
+    atomic_store(&s_replying, true);
+    bool r = hatch_reply_run(delivered, incoming);
+    atomic_store(&s_replying, false);
+    return r;
 }
 
 static void go_idle(const char *caption)
@@ -1533,6 +1561,12 @@ static void voice_task(void *arg)
             if (xQueueReceive(s_queue, &ev, 0) != pdTRUE) {
                 bool follow = false;
                 if (s_follow_until_us) {
+                    if (atomic_exchange(&s_dtap, false)) {   /* head double tap: the conversation ends here */
+                        follow_end("double tap");
+                        pre_reset();
+                        go_idle("");
+                        continue;
+                    }
                     /* Follow-up window: speech starts the next note with no wake word. */
                     bool to_idle;
                     int r = follow_poll(&to_idle);
@@ -1544,6 +1578,7 @@ static void voice_task(void *arg)
                     follow = r == FOLLOW_SPEECH;   /* FOLLOW_WAKE: a normal wake note, below */
                     if (atomic_load(&s_shutdown)) continue;
                 } else {
+                    atomic_store(&s_dtap, false);   /* idle: a double tap has nothing to end */
                     bool tap = atomic_exchange(&s_tap_start, false);
                     bool heard = muse_wake_take() && muse_settings_wake_word();   /* off: consumed and ignored */
                     if ((!tap && !heard) || atomic_load(&s_shutdown)) continue;
@@ -1666,6 +1701,7 @@ static void voice_task(void *arg)
         char why[96];
         s_wake_note = wake_note;
         s_follow_note = follow_note;
+        s_dtap_stop = false;
         bool ok = record(why, sizeof(why));
         s_wake_note = false;
         s_follow_note = false;
@@ -1686,6 +1722,7 @@ static void voice_task(void *arg)
             continue;
         }
         s_reply_ok = false;
+        s_dtap_stop = false;
         pending_down = finish_note();
         pre_reset();
         if (!pending_down && s_reply_ok && !atomic_load(&s_shutdown) && s_follow_n < FOLLOW_MAX &&
@@ -1693,7 +1730,7 @@ static void voice_task(void *arg)
             follow_open();   /* only a note's reply opens it: not speak, a camera turn or a held note */
         } else if (!pending_down && muse_state_mode(NULL) != MUSE_MODE_IDLE) {
             s_follow_n = 0;
-            muse_state_make_happy();
+            if (!s_dtap_stop) muse_state_make_happy();
             go_idle("");
         }
     }
@@ -1721,6 +1758,16 @@ esp_err_t muse_voice_start(QueueHandle_t queue)
         return ESP_ERR_NO_MEM;
     }
     return ESP_OK;
+}
+
+int muse_voice_double_tap(void)
+{
+    if (atomic_load(&s_shutdown) || muse_voice_in_call()) return 0;
+    if (atomic_load(&s_recording) || atomic_load(&s_replying) || s_follow_until_us) {
+        atomic_store(&s_dtap, true);
+        return 1;
+    }
+    return 0;
 }
 
 int muse_voice_tap(void)

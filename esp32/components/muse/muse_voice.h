@@ -59,6 +59,10 @@ void muse_voice_cancel_shutdown(void);
  * not while a reply plays, not in the follow-up window) or, while a note records, to end it
  * normally (sent, not cancelled). Returns 1 start requested, 2 end requested, 0 ignored. */
 int muse_voice_tap(void);
+/* Head double tap: ends the conversation. While a note records it is discarded (not sent); while a reply
+ * plays or the follow-up window is open that is cut off. No follow-up window opens. Returns 1 if it
+ * acted, 0 if idle (nothing to end). */
+int muse_voice_double_tap(void);
 
 /* While on (settings' Sound page), idle mic audio feeds muse_voice_monitor_db(). */
 void muse_voice_set_monitor(bool on);

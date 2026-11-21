@@ -2298,6 +2298,7 @@ static cJSON *on_ws_command(
         cJSON_AddBoolToObject(payload, "ok", muse_prox_available());
         cJSON_AddNumberToObject(payload, "events", muse_prox_events());
         cJSON_AddNumberToObject(payload, "taps", muse_prox_taps());
+        cJSON_AddNumberToObject(payload, "dtaps", muse_prox_dtaps());
         return result;
     }
     if (strcmp(command, "head.move") == 0 || strcmp(command, "head.gesture") == 0) {

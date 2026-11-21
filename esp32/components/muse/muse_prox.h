@@ -20,12 +20,15 @@ int muse_prox_touch(int ch);
 int muse_prox_events(void);
 /* Taps (contact of 400 ms or less) since boot. */
 int muse_prox_taps(void);
+/* Confirmed double taps since boot. */
+int muse_prox_dtaps(void);
 #else
 static inline void muse_prox_start(void) {}
 static inline bool muse_prox_available(void) { return false; }
 static inline int muse_prox_touch(int ch) { (void)ch; return 0; }
 static inline int muse_prox_events(void) { return 0; }
 static inline int muse_prox_taps(void) { return 0; }
+static inline int muse_prox_dtaps(void) { return 0; }
 #endif
 
 #ifdef __cplusplus
