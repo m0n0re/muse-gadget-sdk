@@ -6,6 +6,8 @@
 #include "bsp/esp-bsp.h"
 #include "driver/i2c_master.h"
 #include "esp_log.h"
+#include "esp_timer.h"
+#include "muse_state.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/idf_additions.h"
 #include "freertos/task.h"
@@ -23,6 +25,9 @@ static const char *TAG = "muse_prox";
 static i2c_master_dev_handle_t s_dev;
 static atomic_int s_ch[3];
 static atomic_bool s_ok;
+static atomic_int s_events;
+
+#define PET_REPEAT_MS 500
 
 static esp_err_t rd(uint8_t reg, uint8_t *buf, size_t n)
 {
@@ -92,16 +97,29 @@ static void prox_task(void *arg)
     }
     atomic_store(&s_ok, true);
 
-    int last = -1, fails = 0;
+    int fails = 0;
+    bool touching = false;
+    int64_t pet_start_us = 0, last_happy_us = 0;
     for (;;) {
         if (rd(REG_OUTPUT1, &out, 1) == ESP_OK) {
             fails = 0;
             for (int i = 0; i < 3; i++) atomic_store(&s_ch[i], (out >> (2 * i)) & 0x03);
-            int v = out & 0x3F;
-            if (v != last) {
-                last = v;
-                /* TEMPORARY diagnostic log (on change only): remove when touch reactions are wired up. */
-                ESP_LOGI(TAG, "touch=%d,%d,%d", out & 3, (out >> 2) & 3, (out >> 4) & 3);
+            bool now_touch = (out & 0x3F) != 0;
+            int64_t now = esp_timer_get_time();
+            if (now_touch && !touching) {
+                touching = true;
+                pet_start_us = last_happy_us = now;
+                atomic_fetch_add(&s_events, 1);
+                ESP_LOGI(TAG, "pet start");
+                muse_state_make_happy();   /* also pokes: wakes MUSE_MODE_SLEEP */
+            } else if (now_touch) {
+                if (now - last_happy_us >= (int64_t)PET_REPEAT_MS * 1000) {
+                    last_happy_us = now;
+                    muse_state_make_happy();
+                }
+            } else if (touching) {
+                touching = false;
+                ESP_LOGI(TAG, "pet end (%lld)", (long long)((now - pet_start_us) / 1000));
             }
         } else if (++fails >= 20) {
             ESP_LOGE(TAG, "OUTPUT1 read keeps failing: touch disabled");
@@ -123,6 +141,7 @@ void muse_prox_start(void)
 }
 
 bool muse_prox_available(void) { return atomic_load(&s_ok); }
+int muse_prox_events(void) { return atomic_load(&s_events); }
 int muse_prox_touch(int ch) { return (ch >= 0 && ch < 3 && atomic_load(&s_ok)) ? atomic_load(&s_ch[ch]) : 0; }
 
 #endif

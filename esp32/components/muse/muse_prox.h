@@ -16,10 +16,13 @@ void muse_prox_start(void);
 bool muse_prox_available(void);
 /* Strength of pad ch (0..2): 0 none, 1 weak, 2 medium, 3 strong. 0 if unavailable. */
 int muse_prox_touch(int ch);
+/* Number of touch starts since boot. */
+int muse_prox_events(void);
 #else
 static inline void muse_prox_start(void) {}
 static inline bool muse_prox_available(void) { return false; }
 static inline int muse_prox_touch(int ch) { (void)ch; return 0; }
+static inline int muse_prox_events(void) { return 0; }
 #endif
 
 #ifdef __cplusplus

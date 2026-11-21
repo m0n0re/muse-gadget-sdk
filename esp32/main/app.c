@@ -2296,6 +2296,7 @@ static cJSON *on_ws_command(
         }
         cJSON_AddBoolToObject(payload, "touched", touched);
         cJSON_AddBoolToObject(payload, "ok", muse_prox_available());
+        cJSON_AddNumberToObject(payload, "events", muse_prox_events());
         return result;
     }
     if (strcmp(command, "head.move") == 0 || strcmp(command, "head.gesture") == 0) {
