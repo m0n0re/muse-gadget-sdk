@@ -2279,7 +2279,7 @@ static cJSON *on_ws_command(
         return result;
     }
     if (strcmp(command, "prox.get") == 0) {
-        // Read-only query (not poked above); ps/part_id/ok under payload like voice.get.
+        // Read-only query (not poked above); ch/touched/ok under payload like voice.get.
         cJSON *result = cJSON_CreateObject();
         cJSON_AddBoolToObject(result, "ok", true);
         cJSON *payload = cJSON_AddObjectToObject(result, "payload");
@@ -2287,10 +2287,15 @@ static cJSON *on_ws_command(
             cJSON_Delete(result);
             return command_error("failed", "out of memory");
         }
-        cJSON_AddNumberToObject(payload, "ps", muse_prox_ps());
-        cJSON_AddNumberToObject(payload, "part_id", muse_prox_part_id());
+        cJSON *ch = cJSON_AddArrayToObject(payload, "ch");
+        bool touched = false;
+        for (int i = 0; ch && i < 3; i++) {
+            int v = muse_prox_touch(i);
+            if (v >= 1) touched = true;
+            cJSON_AddItemToArray(ch, cJSON_CreateNumber(v));
+        }
+        cJSON_AddBoolToObject(payload, "touched", touched);
         cJSON_AddBoolToObject(payload, "ok", muse_prox_available());
-        cJSON_AddBoolToObject(payload, "saturated", muse_prox_saturated());
         return result;
     }
     if (strcmp(command, "head.move") == 0 || strcmp(command, "head.gesture") == 0) {

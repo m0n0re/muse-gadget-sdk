@@ -1,5 +1,6 @@
-/* LTR-553ALS-WA proximity sensor (CoreS3 StackChan, top of the head, internal I2C 0x23).
- * Diagnostic stage: reads the raw PS value. Other boards: unsupported. */
+/* Si12T capacitive touch IC (CoreS3 StackChan, 3 pads on top of the head, internal I2C 0x68).
+ * Diagnostic stage: reads the 3 channel strengths (0..3) every 50 ms. Other boards: unsupported.
+ * (Module/file names kept from the earlier LTR-553 attempt.) */
 #pragma once
 
 #include <stdbool.h>
@@ -10,19 +11,15 @@ extern "C" {
 #endif
 
 #if CONFIG_MUSE_BOARD_M5STACK_CORES3
-/* Returns at once; set-up and 100 ms polling run on their own task. Logs and stays disabled on failure. */
+/* Returns at once; set-up and 50 ms polling run on their own task. Logs and stays disabled on failure. */
 void muse_prox_start(void);
 bool muse_prox_available(void);
-/* Latest raw PS (11 bit, 0..2047), or -1 if unavailable. */
-int muse_prox_ps(void);
-bool muse_prox_saturated(void);
-int muse_prox_part_id(void);   /* PART_ID read at init, -1 if never read */
+/* Strength of pad ch (0..2): 0 none, 1 weak, 2 medium, 3 strong. 0 if unavailable. */
+int muse_prox_touch(int ch);
 #else
 static inline void muse_prox_start(void) {}
 static inline bool muse_prox_available(void) { return false; }
-static inline int muse_prox_ps(void) { return -1; }
-static inline bool muse_prox_saturated(void) { return false; }
-static inline int muse_prox_part_id(void) { return -1; }
+static inline int muse_prox_touch(int ch) { (void)ch; return 0; }
 #endif
 
 #ifdef __cplusplus

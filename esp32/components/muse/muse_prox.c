@@ -12,20 +12,17 @@
 
 static const char *TAG = "muse_prox";
 
-#define LTR_ADDR 0x23
-#define REG_ALS_CONTR 0x80
-#define REG_PS_CONTR 0x81
-#define REG_PS_LED 0x82
-#define REG_PS_N_PULSES 0x83
-#define REG_PS_MEAS_RATE 0x84
-#define REG_PART_ID 0x86
-#define REG_PS_DATA 0x8D   /* PS_DATA_0 (low 8), PS_DATA_1 (bit7 saturation, bits2:0 high) */
+#define SI12T_ADDR 0x68
+#define REG_SENS1 0x02     /* 0x02..0x06: sensitivity */
+#define REG_SENS_LAST 0x06
+#define REG_CTRL1 0x08
+#define REG_CTRL2 0x09
+#define REG_REF_RST1 0x0A
+#define REG_OUTPUT1 0x10
 
 static i2c_master_dev_handle_t s_dev;
-static atomic_int s_ps = -1;
-static atomic_bool s_sat;
+static atomic_int s_ch[3];
 static atomic_bool s_ok;
-static atomic_int s_part = -1;
 
 static esp_err_t rd(uint8_t reg, uint8_t *buf, size_t n)
 {
@@ -35,7 +32,33 @@ static esp_err_t rd(uint8_t reg, uint8_t *buf, size_t n)
 static esp_err_t wr(uint8_t reg, uint8_t v)
 {
     uint8_t b[2] = {reg, v};
-    return i2c_master_transmit(s_dev, b, 2, 50);
+    esp_err_t e = i2c_master_transmit(s_dev, b, 2, 50);
+    if (e != ESP_OK) ESP_LOGE(TAG, "write 0x%02x=0x%02x failed (%s)", reg, v, esp_err_to_name(e));
+    return e;
+}
+
+static esp_err_t si12t_init(void)
+{
+    esp_err_t err = ESP_OK;
+    /* 1. enable channels: REF_RST1/2, CH_HOLD1/2, CAL_HOLD1/2 (0x0A..0x0F) = 0 */
+    for (uint8_t r = REG_REF_RST1; r <= 0x0F; r++) {
+        esp_err_t e = wr(r, 0x00);
+        if (err == ESP_OK) err = e;
+    }
+    /* 2. CTRL2: 0x0F then 0x07 */
+    esp_err_t e = wr(REG_CTRL2, 0x0F);
+    if (err == ESP_OK) err = e;
+    e = wr(REG_CTRL2, 0x07);
+    if (err == ESP_OK) err = e;
+    /* 3. CTRL1 */
+    e = wr(REG_CTRL1, 0x22);
+    if (err == ESP_OK) err = e;
+    /* 4. sensitivity (TYPE_LOW, level 3) */
+    for (uint8_t r = REG_SENS1; r <= REG_SENS_LAST; r++) {
+        e = wr(r, 0x33);
+        if (err == ESP_OK) err = e;
+    }
+    return err;
 }
 
 static void prox_task(void *arg)
@@ -44,60 +67,50 @@ static void prox_task(void *arg)
     vTaskDelay(pdMS_TO_TICKS(1500));   /* let the other I2C users start first */
     i2c_master_bus_handle_t bus = bsp_i2c_get_handle();
     if (!bus) {
-        ESP_LOGE(TAG, "no I2C bus: proximity disabled");
+        ESP_LOGE(TAG, "no I2C bus: touch disabled");
         vTaskDelete(NULL);
         return;
     }
-    const i2c_device_config_t cfg = {.dev_addr_length = I2C_ADDR_BIT_LEN_7, .device_address = LTR_ADDR, .scl_speed_hz = 100000};
+    const i2c_device_config_t cfg = {.dev_addr_length = I2C_ADDR_BIT_LEN_7, .device_address = SI12T_ADDR, .scl_speed_hz = 100000};
     esp_err_t err = i2c_master_bus_add_device(bus, &cfg, &s_dev);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "add device 0x%02x failed (%s): proximity disabled", LTR_ADDR, esp_err_to_name(err));
+        ESP_LOGE(TAG, "add device 0x%02x failed (%s): touch disabled", SI12T_ADDR, esp_err_to_name(err));
         vTaskDelete(NULL);
         return;
     }
-    uint8_t id = 0;
-    err = rd(REG_PART_ID, &id, 1);
+    if (si12t_init() != ESP_OK) {
+        ESP_LOGW(TAG, "Si12T init had write errors (see above), trying to read anyway");
+    } else {
+        ESP_LOGI(TAG, "Si12T init done");
+    }
+    uint8_t out = 0;
+    err = rd(REG_OUTPUT1, &out, 1);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "PART_ID read failed (%s): proximity disabled", esp_err_to_name(err));
+        ESP_LOGE(TAG, "OUTPUT1 first read failed (%s): touch disabled", esp_err_to_name(err));
         vTaskDelete(NULL);
         return;
     }
-    atomic_store(&s_part, id);
-    ESP_LOGI(TAG, "PART_ID 0x%02x (%s, expected 0x92)", id, id == 0x92 ? "match" : "MISMATCH");
-
-    /* PS_LED 0x7C: 60 kHz, 100% duty, 100 mA. PULSES 8. MEAS_RATE 50 ms. PS_CONTR 0x23: active + saturation indicator. */
-    err = wr(REG_PS_LED, 0x7C);
-    if (err == ESP_OK) err = wr(REG_PS_N_PULSES, 0x08);
-    if (err == ESP_OK) err = wr(REG_PS_MEAS_RATE, 0x00);
-    if (err == ESP_OK) err = wr(REG_PS_CONTR, 0x23);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "PS setup failed (%s): proximity disabled", esp_err_to_name(err));
-        vTaskDelete(NULL);
-        return;
-    }
-    vTaskDelay(pdMS_TO_TICKS(100));
-    (void)REG_ALS_CONTR;
     atomic_store(&s_ok, true);
 
-    int fails = 0;
+    int last = -1, fails = 0;
     for (;;) {
-        uint8_t d[2];
-        if (rd(REG_PS_DATA, d, 2) == ESP_OK) {
+        if (rd(REG_OUTPUT1, &out, 1) == ESP_OK) {
             fails = 0;
-            int ps = d[0] | ((d[1] & 0x07) << 8);
-            bool sat = d[1] & 0x80;
-            atomic_store(&s_ps, ps);
-            atomic_store(&s_sat, sat);
-            /* TEMPORARY diagnostic log (100 ms): remove in the next stage (tap/pat detection). */
-            ESP_LOGI(TAG, "ps=%d sat=%d", ps, sat);
+            for (int i = 0; i < 3; i++) atomic_store(&s_ch[i], (out >> (2 * i)) & 0x03);
+            int v = out & 0x3F;
+            if (v != last) {
+                last = v;
+                /* TEMPORARY diagnostic log (on change only): remove when touch reactions are wired up. */
+                ESP_LOGI(TAG, "touch=%d,%d,%d", out & 3, (out >> 2) & 3, (out >> 4) & 3);
+            }
         } else if (++fails >= 20) {
-            ESP_LOGE(TAG, "PS read keeps failing: proximity disabled");
+            ESP_LOGE(TAG, "OUTPUT1 read keeps failing: touch disabled");
             atomic_store(&s_ok, false);
-            atomic_store(&s_ps, -1);
+            for (int i = 0; i < 3; i++) atomic_store(&s_ch[i], 0);
             vTaskDelete(NULL);
             return;
         }
-        vTaskDelay(pdMS_TO_TICKS(100));
+        vTaskDelay(pdMS_TO_TICKS(50));
     }
 }
 
@@ -105,13 +118,11 @@ void muse_prox_start(void)
 {
     TaskHandle_t t;
     if (xTaskCreateWithCaps(prox_task, "prox", 3072, NULL, 3, &t, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS) {
-        ESP_LOGE(TAG, "prox task not started: proximity disabled");
+        ESP_LOGE(TAG, "prox task not started: touch disabled");
     }
 }
 
 bool muse_prox_available(void) { return atomic_load(&s_ok); }
-int muse_prox_ps(void) { return atomic_load(&s_ok) ? atomic_load(&s_ps) : -1; }
-bool muse_prox_saturated(void) { return atomic_load(&s_sat); }
-int muse_prox_part_id(void) { return atomic_load(&s_part); }
+int muse_prox_touch(int ch) { return (ch >= 0 && ch < 3 && atomic_load(&s_ok)) ? atomic_load(&s_ch[ch]) : 0; }
 
 #endif
