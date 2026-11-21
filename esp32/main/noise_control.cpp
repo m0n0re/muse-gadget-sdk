@@ -1696,6 +1696,12 @@ static char *build_register_json(void) {
                     "Read-only; does not wake the device from sleep or reset its sleep timer.",
                     nullptr, nullptr);
 
+        add_command(commands, "prox.get",
+                    "Query the head proximity sensor (LTR-553): raw ps value "
+                    "(0..2047), part_id and ok. Read-only; does not wake the "
+                    "device from sleep or reset its sleep timer.",
+                    nullptr, nullptr);
+
         // The 12 RGB LEDs on the base (muse_led.c).
         cJSON *led_required = cJSON_CreateObject();
         for (const char *ch : {"r", "g", "b"}) {

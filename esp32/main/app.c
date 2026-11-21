@@ -43,6 +43,7 @@
 #if CONFIG_MUSE_BOARD_M5STACK_CORES3
 #include "muse_led.h"
 #include "muse_look.h"
+#include "muse_prox.h"
 #include "muse_servo.h"
 #include "muse_settings.h"
 #include "muse_state.h"
@@ -2077,7 +2078,7 @@ static cJSON *on_ws_command(
     // Any received command counts as an interaction: it wakes MUSE_MODE_SLEEP (and restarts the idle timer).
     // Read-only status queries do not (a host may poll them).
 #if CONFIG_MUSE_BOARD_M5STACK_CORES3
-    if (strcmp(command, "head.state") != 0 && strcmp(command, "notify.get") != 0 && strcmp(command, "voice.get") != 0 &&
+    if (strcmp(command, "head.state") != 0 && strcmp(command, "notify.get") != 0 && strcmp(command, "voice.get") != 0 && strcmp(command, "prox.get") != 0 &&
         strcmp(command, "device.list_vms") != 0) muse_state_poke_why(command);
 #endif
 #if CONFIG_HOMEHUB_BLE_COMMANDS
@@ -2275,6 +2276,21 @@ static cJSON *on_ws_command(
         cJSON_AddBoolToObject(payload, "wake_word", muse_settings_wake_word());
         cJSON_AddBoolToObject(payload, "follow_up", muse_settings_follow_up());
         ESP_LOGI(TAG, "voice.get: wake_word %d follow_up %d", muse_settings_wake_word(), muse_settings_follow_up());
+        return result;
+    }
+    if (strcmp(command, "prox.get") == 0) {
+        // Read-only query (not poked above); ps/part_id/ok under payload like voice.get.
+        cJSON *result = cJSON_CreateObject();
+        cJSON_AddBoolToObject(result, "ok", true);
+        cJSON *payload = cJSON_AddObjectToObject(result, "payload");
+        if (!payload) {
+            cJSON_Delete(result);
+            return command_error("failed", "out of memory");
+        }
+        cJSON_AddNumberToObject(payload, "ps", muse_prox_ps());
+        cJSON_AddNumberToObject(payload, "part_id", muse_prox_part_id());
+        cJSON_AddBoolToObject(payload, "ok", muse_prox_available());
+        cJSON_AddBoolToObject(payload, "saturated", muse_prox_saturated());
         return result;
     }
     if (strcmp(command, "head.move") == 0 || strcmp(command, "head.gesture") == 0) {
