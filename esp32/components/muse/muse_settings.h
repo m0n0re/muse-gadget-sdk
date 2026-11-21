@@ -44,6 +44,9 @@
 
 #define MUSE_MIC_GAIN_MAX 36      /* dB; ES7210 PGA, applied in 3 dB steps */
 
+#define MUSE_VOLUME_MAX 200      /* %; 0..100 codec volume, above 100 the rest is digital gain */
+#define MUSE_VOLUME_DIG_DB_PER_PCT 0.24f   /* 150 % = +12 dB, 200 % = +24 dB */
+
 typedef enum {
     MUSE_SETTING_VOLUME,
     MUSE_SETTING_SPEAKER,

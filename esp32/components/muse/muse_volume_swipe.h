@@ -5,6 +5,8 @@
 #include <stdbool.h>
 #include <stdlib.h>
 
+#include "muse_settings.h"
+
 /* Coordinate-only recognizer, shared by every LVGL screen size. Horizontal
  * intent rejects the entire touch; a claimed vertical drag stays claimed. */
 typedef struct {
@@ -35,10 +37,10 @@ static inline bool muse_volume_swipe_move(muse_volume_swipe_t *s, int x, int y)
         if (dy < s->threshold || dy * 2 < dx * 3) return false;
         s->claimed = true;
     }
-    int value = s->origin + (s->y - y) * 100 / s->span;
-    s->value = value < 0 ? 0 : value > 100 ? 100 : value;
+    int value = s->origin + (s->y - y) * MUSE_VOLUME_MAX / s->span;
+    s->value = value < 0 ? 0 : value > MUSE_VOLUME_MAX ? MUSE_VOLUME_MAX : value;
     /* Re-anchor at the limits so reversing direction responds immediately. */
-    if (value <= 0 || value >= 100) {
+    if (value <= 0 || value >= MUSE_VOLUME_MAX) {
         s->origin = s->value;
         s->y = y;
     }
