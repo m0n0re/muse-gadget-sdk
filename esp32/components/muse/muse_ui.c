@@ -963,6 +963,31 @@ static const char *live_caption_tail(const char *text, const answer_layout_t *la
     }
 }
 
+static void update_control_hints(muse_mode_t mode);
+
+/* Whether answer layout `l`'s reply box covers the area `a`: the same box
+ * add_hides() tests the face's own icons against. */
+static bool reply_covers(const answer_layout_t *l, const lv_area_t *a)
+{
+    lv_area_t box = {
+        .x1 = s_w / 2 - l->w / 2, .y1 = s_h / 2 + l->top,
+        .x2 = s_w / 2 + l->w / 2 - 1, .y2 = s_h / 2 + l->top + l->h - 1,
+    };
+    return a->x1 <= box.x2 && a->x2 >= box.x1 && a->y1 <= box.y2 && a->y2 >= box.y1;
+}
+
+/* Whether the answer showing now covers `o`. The rim hints are built after
+ * the layouts, so add_hides() cannot test them; they are checked live here. */
+static bool hint_covered(lv_obj_t *o)
+{
+    if (!o || s_answer < 0) {
+        return false;
+    }
+    lv_area_t a;
+    lv_obj_get_coords(o, &a);
+    return reply_covers(&s_answers[s_answer], &a);
+}
+
 /* Switches to answer layout `which`, or back to the usual one for -1. */
 static void set_answer(int which)
 {
@@ -993,6 +1018,7 @@ static void set_answer(int which)
         lv_obj_set_style_text_align(s_reply_lbl, l->align, 0);
     }
     move_muse(l ? l->px : s_canvas_px, l ? l->y : s_big_y);
+    update_control_hints(muse_state_mode(NULL));   /* a rim hint the reply covers goes too */
 }
 
 /* Whether a reply `w` px wide fits across the screen `y` px from the centre. */
@@ -1029,10 +1055,6 @@ static void set_reply_box(answer_layout_t *l, int cols, int lines, int top, int 
 /* The hint icons a layout's reply would cover go while it's up. */
 static void add_hides(answer_layout_t *l, int n)
 {
-    lv_area_t box = {
-        .x1 = s_w / 2 - l->w / 2, .y1 = s_h / 2 + l->top,
-        .x2 = s_w / 2 + l->w / 2 - 1, .y2 = s_h / 2 + l->top + l->h - 1,
-    };
     lv_obj_t *const hints[] = { s_mic_icon, s_aux_icon };
     for (size_t i = 0; i < 2; i++) {
         if (!hints[i]) {
@@ -1040,7 +1062,7 @@ static void add_hides(answer_layout_t *l, int n)
         }
         lv_area_t a;
         lv_obj_get_coords(hints[i], &a);
-        if (a.x1 <= box.x2 && a.x2 >= box.x1 && a.y1 <= box.y2 && a.y2 >= box.y1) {
+        if (reply_covers(l, &a)) {
             l->hides[n++] = hints[i];
         }
     }
@@ -1863,9 +1885,9 @@ static void update_control_hints(muse_mode_t mode)
     if (!s_ptt_hint) return;
     /* Don't obscure settings rows/keyboards with floating physical icons. */
     bool settings = s_tv && lv_tileview_get_tile_active(s_tv) == s_settings;
-    lv_obj_set_flag(s_ptt_hint, LV_OBJ_FLAG_HIDDEN, settings);
-    lv_obj_set_flag(s_spk_hint, LV_OBJ_FLAG_HIDDEN, settings);
-    lv_obj_set_flag(s_pwr_hint, LV_OBJ_FLAG_HIDDEN, settings);
+    lv_obj_set_flag(s_ptt_hint, LV_OBJ_FLAG_HIDDEN, settings || hint_covered(s_ptt_hint));
+    lv_obj_set_flag(s_spk_hint, LV_OBJ_FLAG_HIDDEN, settings || hint_covered(s_spk_hint));
+    lv_obj_set_flag(s_pwr_hint, LV_OBJ_FLAG_HIDDEN, settings || hint_covered(s_pwr_hint));
     static int last_mode = -1;
     if ((int)mode != last_mode) {
         color_mic(s_ptt_hint, mode == MUSE_MODE_LISTENING ? 0x64d4ff : 0x80bfff);
