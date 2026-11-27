@@ -53,6 +53,9 @@ static int16_t s_out_stereo[MUSE_AUDIO_CHUNK * CHANNELS];
 /* One-pole high-pass on the mixed mic signal. */
 static float s_hpf_a;
 static float s_mic_scale = 1.0f;
+/* Digital mic gain above the codec PGA ceiling, applied in muse_audio_read
+ * (the one path notes and calls all read). */
+static float s_dig_scale = 1.0f;
 static float s_hpf_x1, s_hpf_y1;
 /* Digital gain above 100 % volume, applied to every sample written to the
  * speaker (muse_audio_write and the loopback tone). */
@@ -111,6 +114,12 @@ static void apply_mic_gain(int db)
         s_mic_scale = powf(10.0f, (float)db / 20.0f);   /* no codec gain: scale samples */
         return;
     }
+    /* PGA up to its ceiling; the rest is digital, applied in muse_audio_read. */
+    int pga = db > MUSE_MIC_GAIN_PGA_MAX ? MUSE_MIC_GAIN_PGA_MAX : db;
+    int dig = db - pga;
+    s_dig_scale = powf(10.0f, (float)dig / 20.0f);
+    ESP_LOGI(TAG, "mic gain %d dB (pga %d + digital %d)", db, pga, dig);
+    db = pga;
     if (!s_mic || !codecs_reachable()) {
         return;
     }
@@ -428,6 +437,7 @@ esp_err_t muse_audio_read(int16_t *mono, size_t frames)
             float y = s_hpf_a * (s_hpf_y1 + x - s_hpf_x1);
             s_hpf_x1 = x;
             s_hpf_y1 = y;
+            if (!direct) y *= s_dig_scale;   /* direct mics already scaled in full */
             mono[i] = (int16_t)(y > 32767 ? 32767 : (y < -32768 ? -32768 : y));
         }
         muse_mirror_audio_capture(mono, n);

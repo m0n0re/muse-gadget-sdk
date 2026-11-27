@@ -42,7 +42,8 @@
 #define MUSE_VM_MAX 63
 #define MUSE_TOKEN_MAX 1023
 
-#define MUSE_MIC_GAIN_MAX 36      /* dB; ES7210 PGA, applied in 3 dB steps */
+#define MUSE_MIC_GAIN_PGA_MAX 36  /* dB; codec PGA ceiling, 3 dB steps */
+#define MUSE_MIC_GAIN_MAX 48      /* dB total; above PGA_MAX the rest is digital gain */
 
 #define MUSE_VOLUME_MAX 120      /* %; 0..100 codec volume, above 100 the rest is digital gain */
 #define MUSE_VOLUME_DIG_DB_PER_PCT 0.24f   /* 120 % = +4.8 dB */
