@@ -2062,7 +2062,12 @@ static void update_control_hints(muse_mode_t mode)
 {
     if (!s_ptt_hint) return;
     /* Don't obscure settings rows/keyboards with floating physical icons. */
-    bool settings = s_tv && lv_tileview_get_tile_active(s_tv) == s_settings;
+    lv_obj_t *active = s_tv ? lv_tileview_get_tile_active(s_tv) : NULL;
+    bool settings = active == s_settings;
+#if CONFIG_MUSE_BADGE
+    /* Nor the badge: it is a picture to look at, not a control surface. */
+    settings = settings || active == s_badge;
+#endif
     lv_obj_set_flag(s_ptt_hint, LV_OBJ_FLAG_HIDDEN, settings || hint_covered(s_ptt_hint));
     lv_obj_set_flag(s_spk_hint, LV_OBJ_FLAG_HIDDEN, settings || hint_covered(s_spk_hint));
     lv_obj_set_flag(s_pwr_hint, LV_OBJ_FLAG_HIDDEN, settings || hint_covered(s_pwr_hint));
