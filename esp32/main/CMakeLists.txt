@@ -191,6 +191,12 @@ if(CONFIG_HOMEHUB_BLE_COEX)
         "-Wl,-u,__wrap_coex_schm_status_bit_clear")
 endif()
 
+if(CONFIG_MUSE_BADGE AND NOT CONFIG_MUSE_AVATAR_SYNC)
+    target_sources(${COMPONENT_LIB} PRIVATE "avatar_files.c")
+    idf_component_get_property(badge_littlefs joltwallet__littlefs COMPONENT_LIB)
+    target_link_libraries(${COMPONENT_LIB} PRIVATE ${badge_littlefs})
+endif()
+
 if(CONFIG_MUSE_AVATAR_SYNC)
     target_sources(${COMPONENT_LIB} PRIVATE "avatar_webp.c" "avatar_identity.c" "avatar_cache.c" "avatar_files.c" "avatar_request.c")
     if(CONFIG_MUSE_AVATAR_ANIMATIONS)

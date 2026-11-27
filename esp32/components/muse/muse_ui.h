@@ -66,6 +66,12 @@ int muse_ui_image_bits(void);
 void muse_ui_image_done(void);
 bool muse_ui_image_draw(int x, int y, int w, int h, const uint16_t *pixels);
 void muse_ui_image_hide(void);
+/* display.set_badge / display.clear_badge, from any task: keep the image
+ * currently drawn as the badge tile's picture (stored on the device, so it
+ * survives restarts), or remove the badge. Save fails when no image is
+ * shown. Defined only in MUSE_BADGE builds. */
+bool muse_ui_badge_save(void);
+void muse_ui_badge_clear(void);
 /* Watcher camera mode: shows an on-screen shutter hint over the live image. */
 void muse_ui_camera_hint(bool visible);
 

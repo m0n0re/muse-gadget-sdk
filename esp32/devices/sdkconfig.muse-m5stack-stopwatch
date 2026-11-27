@@ -86,3 +86,4 @@ CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=1024
 
 # Spoken replies via the home TTS endpoint (Mac mini VOICEVOX proxy, same as CoreS3).
 CONFIG_MUSE_TTS_ENDPOINT="http://192.168.24.52:50022/say"
+CONFIG_MUSE_BADGE=y

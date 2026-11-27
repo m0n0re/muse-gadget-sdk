@@ -46,9 +46,21 @@ menu "Muse"
 
     # Always present in sdkconfig.json, including when the bool is disabled.
     # The component manager resolves manifests before all managed Kconfigs.
+    config MUSE_BADGE
+        bool "Badge tile (a saved picture a swipe away)"
+        depends on MUSE_ENABLED && SPIRAM
+        default n
+        help
+            Adds a tile left of the face that shows one saved picture like
+            a pin badge. Holding a drawn image (display.draw_file or
+            display.draw_url), or the display.set_badge command, saves it
+            as the badge on the files partition, so it survives restarts.
+            Swipe right from the face to see it.
+
     config MUSE_AVATAR_DEPS
         string
         default "y" if MUSE_AVATAR_SYNC
+        default "y" if MUSE_BADGE
         default "n"
 
     config MUSE_LATEST_REPLY

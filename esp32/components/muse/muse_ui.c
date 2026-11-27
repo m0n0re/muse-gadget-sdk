@@ -27,6 +27,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "esp_heap_caps.h"
 #include "esp_log.h"
@@ -52,8 +53,10 @@
 #include "muse_mirror.h"
 #endif
 #include "muse_pixel.h"
-#if CONFIG_MUSE_AVATAR_SYNC
+#if CONFIG_MUSE_AVATAR_SYNC || CONFIG_MUSE_BADGE
 #include "muse_avatar.h"
+#endif
+#if CONFIG_MUSE_AVATAR_SYNC
 #if CONFIG_MUSE_UI_THEME
 #include "muse_avatar_theme.h"
 #include "muse_theme_lvgl.h"
@@ -189,7 +192,9 @@ bool muse_ui_volume_swiping(void)
     return s_volume_swiping;
 }
 static lv_obj_t *s_settings;
-#if CONFIG_MUSE_LATEST_REPLY
+#if CONFIG_MUSE_LATEST_REPLY && CONFIG_MUSE_BADGE
+#define PAGE_DOTS 4
+#elif CONFIG_MUSE_LATEST_REPLY || CONFIG_MUSE_BADGE
 #define PAGE_DOTS 3
 #else
 #define PAGE_DOTS 2
@@ -241,6 +246,16 @@ static lv_obj_t *s_aux_icon;
 static lv_obj_t *s_talk_hint_lbl, *s_end_hint_lbl;
 #define CALL_HINT_OUT 26   /* px outwards from the rim icon's x: the 320 px avatar's sparkles reach ~125 */
 #endif
+#if CONFIG_MUSE_BADGE
+static lv_obj_t *s_badge;        /* the badge tile, left of the face */
+static lv_obj_t *s_badge_img;
+static lv_obj_t *s_badge_lbl;
+static lv_image_dsc_t s_badge_dsc;
+static uint16_t *s_badge_buf;    /* the badge's pixels, screen-sized RGB565 */
+static bool s_badge_have;
+static int s_badge_col;
+#endif
+static int s_face_col;           /* the face tile's column in the tileview */
 static lv_obj_t *s_image;   /* display.draw_url, over the face */
 #if CONFIG_MUSE_WATCHER_CAMERA
 static lv_obj_t *s_camera_hint;
@@ -1512,6 +1527,161 @@ static lv_obj_t *s_listen_icon;   /* status line: "Hey Muse" listening is on */
 static int s_shown_listen = -1;   /* 0 hidden, 1 on but paused, 2 listening */
 #endif
 
+
+static void image_hide_locked(void);
+
+#if CONFIG_MUSE_BADGE
+/* One saved picture shown on its own tile like a pin badge: the pixels a
+ * display.draw_* call put on the screen, kept on the files partition so the
+ * badge survives restarts. Holding the drawn image, or display.set_badge,
+ * saves it; display.clear_badge removes it. */
+#define BADGE_PATH "/files/badge.bin"
+#define BADGE_MAGIC 0x42444731u   /* 'BDG1' */
+
+/* With the display lock held (the LVGL task). */
+static void badge_show(void)
+{
+    if (s_badge_have && s_badge_buf) {
+        s_badge_dsc.header.magic = LV_IMAGE_HEADER_MAGIC;
+        s_badge_dsc.header.cf = LV_COLOR_FORMAT_RGB565;
+        s_badge_dsc.header.w = s_w;
+        s_badge_dsc.header.h = s_h;
+        s_badge_dsc.header.stride = s_w * sizeof(uint16_t);
+        s_badge_dsc.data_size = (size_t)s_w * s_h * sizeof(uint16_t);
+        s_badge_dsc.data = (const uint8_t *)s_badge_buf;
+        lv_image_set_src(s_badge_img, &s_badge_dsc);
+        lv_obj_remove_flag(s_badge_img, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s_badge_lbl, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_image_set_src(s_badge_img, NULL);
+        lv_obj_add_flag(s_badge_img, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_remove_flag(s_badge_lbl, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+static void badge_load(void)
+{
+    if (!muse_avatar_files_mount()) {
+        return;
+    }
+    FILE *f = fopen(BADGE_PATH, "rb");
+    if (!f) {
+        return;
+    }
+    uint32_t hdr[2];
+    bool ok = fread(hdr, sizeof(hdr), 1, f) == 1 && hdr[0] == BADGE_MAGIC &&
+              (hdr[1] & 0xffffu) == (uint32_t)s_w && (hdr[1] >> 16) == (uint32_t)s_h;
+    if (ok) {
+        if (!s_badge_buf) {
+            s_badge_buf = heap_caps_calloc((size_t)s_w * s_h, sizeof(uint16_t), MALLOC_CAP_SPIRAM);
+        }
+        ok = s_badge_buf && fread(s_badge_buf, sizeof(uint16_t), (size_t)s_w * s_h, f) == (size_t)s_w * s_h;
+    }
+    fclose(f);
+    s_badge_have = ok;
+    badge_show();
+}
+
+/* With the display lock held. */
+static void badge_clear_locked(void)
+{
+    if (!s_badge_have) {
+        return;
+    }
+    if (muse_avatar_files_mount()) {
+        unlink(BADGE_PATH);
+    }
+    s_badge_have = false;
+    badge_show();
+    muse_state_set_hint("BADGE CLEARED");
+}
+
+void muse_ui_badge_clear(void)
+{
+    if (!s_ready) {
+        return;
+    }
+    muse_board->display_lock(-1);
+    badge_clear_locked();
+    muse_board->display_unlock();
+}
+
+/* With the display lock held. False when no image is shown or the badge
+ * could not be written. */
+static bool badge_save_locked(void)
+{
+    xSemaphoreTake(s_image_mutex, portMAX_DELAY);
+    if (!s_image_buf) {
+        xSemaphoreGive(s_image_mutex);
+        return false;
+    }
+    if (!s_badge_buf) {
+        s_badge_buf = heap_caps_calloc((size_t)s_w * s_h, sizeof(uint16_t), MALLOC_CAP_SPIRAM);
+    }
+    if (!s_badge_buf) {
+        xSemaphoreGive(s_image_mutex);
+        return false;
+    }
+    memcpy(s_badge_buf, s_image_buf, (size_t)s_w * s_h * sizeof(uint16_t));
+    xSemaphoreGive(s_image_mutex);
+    if (!muse_avatar_files_mount()) {
+        ESP_LOGW(TAG, "badge: files partition unavailable");
+        return false;
+    }
+    FILE *f = fopen(BADGE_PATH, "wb");
+    if (!f) {
+        ESP_LOGW(TAG, "badge: cannot open %s", BADGE_PATH);
+        return false;
+    }
+    uint32_t hdr[2] = { BADGE_MAGIC, (uint32_t)s_w | ((uint32_t)s_h << 16) };
+    bool ok = fwrite(hdr, sizeof(hdr), 1, f) == 1 &&
+              fwrite(s_badge_buf, sizeof(uint16_t), (size_t)s_w * s_h, f) == (size_t)s_w * s_h;
+    fclose(f);
+    if (!ok) {
+        ESP_LOGW(TAG, "badge: write failed");
+        return false;
+    }
+    s_badge_have = true;
+    badge_show();
+    image_hide_locked();
+    if (s_tv) {
+        lv_tileview_set_tile(s_tv, s_badge, LV_ANIM_ON);
+    }
+    muse_state_set_hint("BADGE SET");
+    return true;
+}
+
+bool muse_ui_badge_save(void)
+{
+    if (!s_ready) {
+        return false;
+    }
+    muse_board->display_lock(-1);
+    bool ok = badge_save_locked();
+    muse_board->display_unlock();
+    return ok;
+}
+
+/* Holding a drawn image keeps it as the badge. Runs with the display lock
+ * held (an LVGL event), like on_image_clicked. */
+static void on_image_long_pressed(lv_event_t *e)
+{
+    (void)e;
+    badge_save_locked();
+}
+
+static void build_badge_tile(void)
+{
+    s_badge_img = lv_image_create(s_badge);
+    lv_obj_set_pos(s_badge_img, 0, 0);
+    lv_obj_add_flag(s_badge_img, LV_OBJ_FLAG_HIDDEN);
+    s_badge_lbl = make_label(s_badge, s_small ? &lv_font_unscii_8 : &lv_font_unscii_16, 0xffffff);
+    lv_label_set_text(s_badge_lbl, "NO BADGE");
+    lv_obj_center(s_badge_lbl);
+    badge_load();
+}
+#endif
+
 static void build_screen(void)
 {
 #if CONFIG_MUSE_LATIN_FONT
@@ -1529,12 +1699,23 @@ static void build_screen(void)
         muse_theme_set_style_bg_color(s_tv, lv_color_black(), 0);
         lv_obj_set_style_bg_opa(s_tv, LV_OPA_COVER, 0);
         lv_obj_set_scrollbar_mode(s_tv, LV_SCROLLBAR_MODE_OFF);
+        int col = 0;
 #if CONFIG_MUSE_LATEST_REPLY
         muse_latest_reply_build(s_tv, caption_font_for);
-        s_face = lv_tileview_add_tile(s_tv, 1, 0, LV_DIR_HOR);
-#else
-        s_face = lv_tileview_add_tile(s_tv, 0, 0, LV_DIR_RIGHT);
+        col = 1;
 #endif
+#if CONFIG_MUSE_BADGE
+        /* The badge tile: swipe right from the face to reach it. */
+        s_badge = lv_tileview_add_tile(s_tv, col, 0, LV_DIR_RIGHT);
+        lv_obj_set_scrollbar_mode(s_badge, LV_SCROLLBAR_MODE_OFF);
+        muse_theme_set_style_bg_color(s_badge, lv_color_black(), 0);
+        lv_obj_set_style_bg_opa(s_badge, LV_OPA_COVER, 0);
+        s_badge_col = col;
+        col++;
+#endif
+        s_face = lv_tileview_add_tile(s_tv, col, 0, col ? LV_DIR_HOR : LV_DIR_RIGHT);
+        s_face_col = col;
+        col++;
         /* It never scrolls, but LVGL would size its scrollbars from all its
          * children every time it draws any part of it. */
         lv_obj_set_scrollbar_mode(s_face, LV_SCROLLBAR_MODE_OFF);
@@ -1542,15 +1723,12 @@ static void build_screen(void)
          * shows as a different-coloured square around the character. */
         muse_theme_set_style_bg_color(s_face, lv_color_black(), 0);
         lv_obj_set_style_bg_opa(s_face, LV_OPA_COVER, 0);
-        s_settings = lv_tileview_add_tile(s_tv,
-#if CONFIG_MUSE_LATEST_REPLY
-            2,
-#else
-            1,
-#endif
-            0, LV_DIR_LEFT);
+        s_settings = lv_tileview_add_tile(s_tv, col, 0, LV_DIR_LEFT);
         lv_tileview_set_tile(s_tv, s_face, LV_ANIM_OFF);
         lv_obj_add_event_cb(s_tv, tile_changed_cb, LV_EVENT_VALUE_CHANGED, NULL);
+#if CONFIG_MUSE_BADGE
+        build_badge_tile();
+#endif
         face = s_face;
         if (muse_board->audio_init) {
             /* Horizontal drags chain to the tileview; vertical drags belong
@@ -1956,6 +2134,9 @@ static void build_overlays(void)
     lv_obj_set_pos(s_image, 0, 0);
     lv_obj_add_flag(s_image, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_event_cb(s_image, on_image_clicked, LV_EVENT_CLICKED, NULL);
+#if CONFIG_MUSE_BADGE
+    lv_obj_add_event_cb(s_image, on_image_long_pressed, LV_EVENT_LONG_PRESSED, NULL);
+#endif
 #if CONFIG_MUSE_WATCHER_CAMERA
     s_camera_hint = lv_btn_create(scr);
     lv_obj_set_size(s_camera_hint, 244, 46);
@@ -2155,10 +2336,17 @@ static void update_chrome(float now)
         s_swipe_enabled = !page || !subpage;
         update_tileview_swipe();
         bool hide_dots = page && subpage;
-#if CONFIG_MUSE_LATEST_REPLY
-        int selected = page ? 2 : lv_tileview_get_tile_active(s_tv) == s_face ? 1 : 0;
-#else
-        int selected = page;
+        lv_obj_t *active_tile = lv_tileview_get_tile_active(s_tv);
+        int selected = 0;
+        if (page) {
+            selected = PAGE_DOTS - 1;
+        } else if (active_tile == s_face) {
+            selected = s_face_col;
+        }
+#if CONFIG_MUSE_BADGE
+        else if (active_tile == s_badge) {
+            selected = s_badge_col;
+        }
 #endif
         int shown = selected * 2 + subpage;
         if (shown != s_shown_page) {
@@ -2168,11 +2356,7 @@ static void update_chrome(float now)
             }
             s_shown_page = shown;
         }
-#if CONFIG_MUSE_LATEST_REPLY
         muse_settings_ui_tick(page);
-#else
-        muse_settings_ui_tick(lv_obj_get_scroll_x(s_tv) > 0);
-#endif
     }
 
     /* Joining, the icon blinks: the compact layout has no state label. */
@@ -2707,13 +2891,7 @@ static void frame_tick(lv_timer_t *timer)
     if (s_image_dsc.data) {
         return;   /* the image covers the face */
     }
-    if (s_tv && lv_obj_get_scroll_x(s_tv) !=
-#if CONFIG_MUSE_LATEST_REPLY
-        s_w
-#else
-        0
-#endif
-    ) {
+    if (s_tv && lv_obj_get_scroll_x(s_tv) != s_face_col * s_w) {
         /* Off screen, or sliding to or from settings: hold still so the
          * slide gets the whole frame time. */
         return;

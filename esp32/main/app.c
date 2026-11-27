@@ -47,6 +47,7 @@
 #if CONFIG_MUSE_WASM_APPS
 #include "muse_apps.h"
 #endif
+#include "muse_ui.h"
 #include "token_fp.h"
 #include "config_store.h"
 #include "wifi_mgr.h"
@@ -2140,6 +2141,26 @@ static cJSON *on_ws_command(
         cJSON *async = cJSON_CreateObject();
         cJSON_AddBoolToObject(async, "_async", true);
         return async;
+    }
+#endif
+#if CONFIG_MUSE_BADGE
+    // Local extension of this fork: keep the drawn image as the badge, or
+    // remove it, without touching the watch.
+    if (strcmp(command, "display.set_badge") == 0) {
+        if (!muse_ui_badge_save()) {
+            return command_error("no_image", "no image is shown; draw one first with display.draw_file or display.draw_url");
+        }
+        cJSON *reply = cJSON_CreateObject();
+        cJSON_AddBoolToObject(reply, "ok", true);
+        cJSON_AddBoolToObject(reply, "badge_set", true);
+        return reply;
+    }
+    if (strcmp(command, "display.clear_badge") == 0) {
+        muse_ui_badge_clear();
+        cJSON *reply = cJSON_CreateObject();
+        cJSON_AddBoolToObject(reply, "ok", true);
+        cJSON_AddBoolToObject(reply, "badge_set", false);
+        return reply;
     }
 #endif
 #if CONFIG_MUSE_HATCH
