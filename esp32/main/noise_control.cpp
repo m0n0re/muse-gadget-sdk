@@ -1622,18 +1622,36 @@ static char *build_register_json(void) {
             bits == 4 ? 120000 : 60000);
         add_command(commands, "display.show_animation", restore, nullptr, nullptr);
 #if CONFIG_MUSE_BADGE
+        cJSON *badge_optional = cJSON_CreateObject();
+        cJSON *interval_param = cJSON_CreateObject();
+        cJSON_AddStringToObject(interval_param, "type", "integer");
+        cJSON_AddStringToObject(interval_param, "description",
+                                "Milliseconds between frames of an animated "
+                                "badge; 100 to 5000, default 400.");
+        cJSON_AddItemToObject(badge_optional, "interval_ms", interval_param);
         add_command(commands, "display.set_badge",
-                    "Save the image currently shown by display.draw_file or "
-                    "display.draw_url as the badge: the picture on the tile "
-                    "a swipe right from the face shows. Stored on the "
-                    "device, so it survives restarts. Replies when the badge "
-                    "is saved; fails when no image is shown.",
+                    "Start a badge from the image currently shown by "
+                    "display.draw_file or display.draw_url: the picture on "
+                    "the tile a swipe right from the face shows. This is "
+                    "frame 1 of a badge animation; add more frames with "
+                    "display.add_badge_frame. Stored on the device, so it "
+                    "survives restarts. Replies when the badge is saved; "
+                    "fails when no image is shown.",
+                    nullptr, badge_optional);
+        add_command(commands, "display.add_badge_frame",
+                    "Append the image currently shown by display.draw_file "
+                    "or display.draw_url as the next frame of the badge "
+                    "animation started by display.set_badge. Replies with "
+                    "the new frame count; fails when there is no animated "
+                    "badge to extend or it already has 32 frames.",
                     nullptr, nullptr);
         add_command(commands, "display.clear_badge",
                     "Remove the saved badge picture.",
                     nullptr, nullptr);
         cJSON_AddNumberToObject(
             cJSON_GetObjectItem(commands, "display.set_badge"), "timeout_ms", 10000);
+        cJSON_AddNumberToObject(
+            cJSON_GetObjectItem(commands, "display.add_badge_frame"), "timeout_ms", 10000);
         cJSON_AddNumberToObject(
             cJSON_GetObjectItem(commands, "display.clear_badge"), "timeout_ms", 10000);
 #endif

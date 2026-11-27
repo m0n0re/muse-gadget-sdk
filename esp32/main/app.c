@@ -2147,12 +2147,24 @@ static cJSON *on_ws_command(
     // Local extension of this fork: keep the drawn image as the badge, or
     // remove it, without touching the watch.
     if (strcmp(command, "display.set_badge") == 0) {
-        if (!muse_ui_badge_save()) {
+        const cJSON *iv = params ? cJSON_GetObjectItemCaseSensitive(params, "interval_ms") : NULL;
+        int interval = cJSON_IsNumber(iv) ? iv->valueint : 400;
+        if (!muse_ui_badge_save(interval)) {
             return command_error("no_image", "no image is shown; draw one first with display.draw_file or display.draw_url");
         }
         cJSON *reply = cJSON_CreateObject();
         cJSON_AddBoolToObject(reply, "ok", true);
         cJSON_AddBoolToObject(reply, "badge_set", true);
+        return reply;
+    }
+    if (strcmp(command, "display.add_badge_frame") == 0) {
+        int frames = muse_ui_badge_append();
+        if (frames < 0) {
+            return command_error("cannot_append", "no animated badge to extend, the badge is full, or no image is shown; start with display.set_badge");
+        }
+        cJSON *reply = cJSON_CreateObject();
+        cJSON_AddBoolToObject(reply, "ok", true);
+        cJSON_AddNumberToObject(reply, "frames", frames);
         return reply;
     }
     if (strcmp(command, "display.clear_badge") == 0) {

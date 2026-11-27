@@ -251,7 +251,7 @@ static lv_obj_t *s_badge;        /* the badge tile, left of the face */
 static lv_obj_t *s_badge_img;
 static lv_obj_t *s_badge_lbl;
 static lv_image_dsc_t s_badge_dsc;
-static uint16_t *s_badge_buf;    /* the badge's pixels, screen-sized RGB565 */
+static uint16_t *s_badge_buf;    /* the badge frame on screen now, RGB565 */
 static bool s_badge_have;
 static int s_badge_col;
 #endif
@@ -1531,12 +1531,33 @@ static int s_shown_listen = -1;   /* 0 hidden, 1 on but paused, 2 listening */
 static void image_hide_locked(void);
 
 #if CONFIG_MUSE_BADGE
-/* One saved picture shown on its own tile like a pin badge: the pixels a
- * display.draw_* call put on the screen, kept on the files partition so the
- * badge survives restarts. Holding the drawn image, or display.set_badge,
- * saves it; display.clear_badge removes it. */
+/* A saved picture, or a short sequence of pictures, shown on its own tile
+ * like a pin badge: frames a display.draw_* call put on the screen, kept
+ * on the files partition so the badge survives restarts. Frames are stored
+ * at half size and shown scaled up: sharpness is traded for room for more
+ * frames (frame count over quality, as the user asked). One file: a
+ * header, then the frames back to back. Holding the drawn image, or
+ * display.set_badge, starts a new sequence from it;
+ * display.add_badge_frame appends; display.clear_badge removes it.
+ * Files from the first version (one full-size frame, 'BDG1') still load
+ * as a one-frame badge. */
 #define BADGE_PATH "/files/badge.bin"
-#define BADGE_MAGIC 0x42444731u   /* 'BDG1' */
+#define BADGE_MAGIC_V1 0x42444731u   /* 'BDG1' */
+#define BADGE_MAGIC 0x42444732u      /* 'BDG2' */
+#define BADGE_MAX_FRAMES 32
+#define BADGE_DEFAULT_INTERVAL_MS 400
+
+static int s_badge_frames;         /* frames in the loaded badge; 0 = none */
+static int s_badge_index;          /* the frame on screen now */
+static int s_badge_fw, s_badge_fh; /* the stored frame size */
+static int s_badge_hdr_words;      /* 2 for BDG1 files, 4 for BDG2 */
+static uint32_t s_badge_interval_ms;
+static int64_t s_badge_last_us;    /* when the frame last advanced */
+
+static size_t badge_frame_bytes(void)
+{
+    return (size_t)s_badge_fw * s_badge_fh * sizeof(uint16_t);
+}
 
 /* With the display lock held (the LVGL task). */
 static void badge_show(void)
@@ -1544,12 +1565,14 @@ static void badge_show(void)
     if (s_badge_have && s_badge_buf) {
         s_badge_dsc.header.magic = LV_IMAGE_HEADER_MAGIC;
         s_badge_dsc.header.cf = LV_COLOR_FORMAT_RGB565;
-        s_badge_dsc.header.w = s_w;
-        s_badge_dsc.header.h = s_h;
-        s_badge_dsc.header.stride = s_w * sizeof(uint16_t);
-        s_badge_dsc.data_size = (size_t)s_w * s_h * sizeof(uint16_t);
+        s_badge_dsc.header.w = s_badge_fw;
+        s_badge_dsc.header.h = s_badge_fh;
+        s_badge_dsc.header.stride = s_badge_fw * sizeof(uint16_t);
+        s_badge_dsc.data_size = badge_frame_bytes();
         s_badge_dsc.data = (const uint8_t *)s_badge_buf;
         lv_image_set_src(s_badge_img, &s_badge_dsc);
+        lv_image_set_pivot(s_badge_img, 0, 0);
+        lv_image_set_scale(s_badge_img, (uint32_t)256 * s_w / s_badge_fw);
         lv_obj_remove_flag(s_badge_img, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(s_badge_lbl, LV_OBJ_FLAG_HIDDEN);
     } else {
@@ -1557,6 +1580,15 @@ static void badge_show(void)
         lv_obj_add_flag(s_badge_img, LV_OBJ_FLAG_HIDDEN);
         lv_obj_remove_flag(s_badge_lbl, LV_OBJ_FLAG_HIDDEN);
     }
+}
+
+/* Read frame `index` into s_badge_buf. Display lock held. */
+static bool badge_read_frame(FILE *f, int index)
+{
+    size_t bytes = badge_frame_bytes();
+    long off = (long)(s_badge_hdr_words * sizeof(uint32_t)) +
+               (long)index * (long)bytes;
+    return fseek(f, off, SEEK_SET) == 0 && fread(s_badge_buf, 1, bytes, f) == bytes;
 }
 
 static void badge_load(void)
@@ -1568,18 +1600,96 @@ static void badge_load(void)
     if (!f) {
         return;
     }
-    uint32_t hdr[2];
-    bool ok = fread(hdr, sizeof(hdr), 1, f) == 1 && hdr[0] == BADGE_MAGIC &&
-              (hdr[1] & 0xffffu) == (uint32_t)s_w && (hdr[1] >> 16) == (uint32_t)s_h;
+    uint32_t hdr[4] = { 0 };
+    bool ok = false;
+    if (fread(hdr, sizeof(uint32_t), 2, f) == 2) {
+        if (hdr[0] == BADGE_MAGIC_V1 &&
+            (hdr[1] & 0xffffu) == (uint32_t)s_w && (hdr[1] >> 16) == (uint32_t)s_h) {
+            s_badge_fw = s_w;
+            s_badge_fh = s_h;
+            s_badge_frames = 1;
+            s_badge_interval_ms = BADGE_DEFAULT_INTERVAL_MS;
+            s_badge_hdr_words = 2;
+            ok = true;
+        } else if (hdr[0] == BADGE_MAGIC &&
+                   fread(&hdr[2], sizeof(uint32_t), 2, f) == 2) {
+            int w = (int)(hdr[1] & 0xffffu), h = (int)(hdr[1] >> 16);
+            int count = (int)hdr[2];
+            if (w > 0 && h > 0 && w <= s_w && h <= s_h &&
+                count >= 1 && count <= BADGE_MAX_FRAMES) {
+                s_badge_fw = w;
+                s_badge_fh = h;
+                s_badge_frames = count;
+                s_badge_interval_ms = hdr[3] >= 100 && hdr[3] <= 5000
+                                          ? hdr[3] : BADGE_DEFAULT_INTERVAL_MS;
+                s_badge_hdr_words = 4;
+                ok = true;
+            }
+        }
+    }
     if (ok) {
         if (!s_badge_buf) {
-            s_badge_buf = heap_caps_calloc((size_t)s_w * s_h, sizeof(uint16_t), MALLOC_CAP_SPIRAM);
+            s_badge_buf = heap_caps_malloc(badge_frame_bytes(), MALLOC_CAP_SPIRAM);
         }
-        ok = s_badge_buf && fread(s_badge_buf, sizeof(uint16_t), (size_t)s_w * s_h, f) == (size_t)s_w * s_h;
+        ok = s_badge_buf && badge_read_frame(f, 0);
     }
     fclose(f);
-    s_badge_have = ok;
+    if (!ok) {
+        s_badge_frames = 0;
+    }
+    s_badge_index = 0;
+    s_badge_have = s_badge_frames > 0;
     badge_show();
+}
+
+/* Advance an animated badge while its tile is on screen; the frames live
+ * on flash and are read in as they come up, so a long sequence costs one
+ * frame of RAM. Called from the UI tick with the display lock held. */
+static void badge_tick(void)
+{
+    if (s_badge_frames <= 1 || !s_badge_buf) {
+        return;
+    }
+    if (!s_tv || lv_tileview_get_tile_active(s_tv) != s_badge) {
+        s_badge_last_us = esp_timer_get_time();
+        return;
+    }
+    int64_t now = esp_timer_get_time();
+    if (now - s_badge_last_us < (int64_t)s_badge_interval_ms * 1000) {
+        return;
+    }
+    s_badge_last_us = now;
+    FILE *f = fopen(BADGE_PATH, "rb");
+    if (!f) {
+        return;
+    }
+    int next = (s_badge_index + 1) % s_badge_frames;
+    if (badge_read_frame(f, next)) {
+        s_badge_index = next;
+        lv_obj_invalidate(s_badge_img);
+    }
+    fclose(f);
+}
+
+/* Halve the drawn image into `out` (s_w/2 by s_h/2), averaging each 2x2
+ * block. The caller holds s_image_mutex. */
+static void badge_downscale(const uint16_t *src, uint16_t *out)
+{
+    int fw = s_w / 2, fh = s_h / 2;
+    for (int y = 0; y < fh; y++) {
+        for (int x = 0; x < fw; x++) {
+            const uint16_t *p = src + (size_t)(2 * y) * s_w + 2 * x;
+            uint32_t r = 0, g = 0, b = 0;
+            for (int i = 0; i < 4; i++) {
+                uint16_t px = p[(i & 1) + (size_t)(i >> 1) * s_w];
+                r += (px >> 11) & 0x1f;
+                g += (px >> 5) & 0x3f;
+                b += px & 0x1f;
+            }
+            out[(size_t)y * fw + x] =
+                (uint16_t)(((r / 4) << 11) | ((g / 4) << 5) | (b / 4));
+        }
+    }
 }
 
 /* With the display lock held. */
@@ -1591,6 +1701,8 @@ static void badge_clear_locked(void)
     if (muse_avatar_files_mount()) {
         unlink(BADGE_PATH);
     }
+    s_badge_frames = 0;
+    s_badge_index = 0;
     s_badge_have = false;
     badge_show();
     muse_state_set_hint("BADGE CLEARED");
@@ -1606,42 +1718,69 @@ void muse_ui_badge_clear(void)
     muse_board->display_unlock();
 }
 
-/* With the display lock held. False when no image is shown or the badge
- * could not be written. */
-static bool badge_save_locked(void)
+/* Start a new badge sequence from the drawn image. With the display lock
+ * held. False when no image is shown or the badge could not be written. */
+static bool badge_save_locked(int interval_ms)
 {
+    if (interval_ms < 100 || interval_ms > 5000) {
+        interval_ms = BADGE_DEFAULT_INTERVAL_MS;
+    }
+    int fw = s_w / 2, fh = s_h / 2;
+    size_t bytes = (size_t)fw * fh * sizeof(uint16_t);
+    uint16_t *frame = heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM);
+    if (!frame) {
+        return false;
+    }
     xSemaphoreTake(s_image_mutex, portMAX_DELAY);
     if (!s_image_buf) {
         xSemaphoreGive(s_image_mutex);
+        heap_caps_free(frame);
         return false;
     }
-    if (!s_badge_buf) {
-        s_badge_buf = heap_caps_calloc((size_t)s_w * s_h, sizeof(uint16_t), MALLOC_CAP_SPIRAM);
-    }
-    if (!s_badge_buf) {
-        xSemaphoreGive(s_image_mutex);
-        return false;
-    }
-    memcpy(s_badge_buf, s_image_buf, (size_t)s_w * s_h * sizeof(uint16_t));
+    badge_downscale(s_image_buf, frame);
     xSemaphoreGive(s_image_mutex);
     if (!muse_avatar_files_mount()) {
         ESP_LOGW(TAG, "badge: files partition unavailable");
+        heap_caps_free(frame);
         return false;
     }
     FILE *f = fopen(BADGE_PATH, "wb");
     if (!f) {
         ESP_LOGW(TAG, "badge: cannot open %s", BADGE_PATH);
+        heap_caps_free(frame);
         return false;
     }
-    uint32_t hdr[2] = { BADGE_MAGIC, (uint32_t)s_w | ((uint32_t)s_h << 16) };
+    uint32_t hdr[4] = { BADGE_MAGIC, (uint32_t)fw | ((uint32_t)fh << 16),
+                        1, (uint32_t)interval_ms };
     bool ok = fwrite(hdr, sizeof(hdr), 1, f) == 1 &&
-              fwrite(s_badge_buf, sizeof(uint16_t), (size_t)s_w * s_h, f) == (size_t)s_w * s_h;
+              fwrite(frame, 1, bytes, f) == bytes;
     fclose(f);
     if (!ok) {
         ESP_LOGW(TAG, "badge: write failed");
+        heap_caps_free(frame);
         return false;
     }
-    s_badge_have = true;
+    s_badge_fw = fw;
+    s_badge_fh = fh;
+    s_badge_frames = 1;
+    s_badge_index = 0;
+    s_badge_interval_ms = (uint32_t)interval_ms;
+    s_badge_hdr_words = 4;
+    if (s_badge_buf) {
+        heap_caps_free(s_badge_buf);
+        s_badge_buf = NULL;
+    }
+    s_badge_buf = heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM);
+    if (s_badge_buf) {
+        memcpy(s_badge_buf, frame, bytes);
+    }
+    heap_caps_free(frame);
+    s_badge_have = s_badge_buf != NULL;
+    if (!s_badge_have) {
+        s_badge_frames = 0;
+        badge_show();
+        return false;
+    }
     badge_show();
     image_hide_locked();
     if (s_tv) {
@@ -1651,15 +1790,74 @@ static bool badge_save_locked(void)
     return true;
 }
 
-bool muse_ui_badge_save(void)
+bool muse_ui_badge_save(int interval_ms)
 {
     if (!s_ready) {
         return false;
     }
     muse_board->display_lock(-1);
-    bool ok = badge_save_locked();
+    bool ok = badge_save_locked(interval_ms);
     muse_board->display_unlock();
     return ok;
+}
+
+/* Append the drawn image as the next frame of the loaded sequence. With
+ * the display lock held. Returns the new frame count, or -1. */
+static int badge_append_locked(void)
+{
+    if (s_badge_frames < 1 || s_badge_hdr_words != 4 ||
+        s_badge_fw != s_w / 2 || s_badge_fh != s_h / 2 ||
+        s_badge_frames >= BADGE_MAX_FRAMES) {
+        return -1;
+    }
+    size_t bytes = badge_frame_bytes();
+    uint16_t *frame = heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM);
+    if (!frame) {
+        return -1;
+    }
+    xSemaphoreTake(s_image_mutex, portMAX_DELAY);
+    if (!s_image_buf) {
+        xSemaphoreGive(s_image_mutex);
+        heap_caps_free(frame);
+        return -1;
+    }
+    badge_downscale(s_image_buf, frame);
+    xSemaphoreGive(s_image_mutex);
+    if (!muse_avatar_files_mount()) {
+        heap_caps_free(frame);
+        return -1;
+    }
+    FILE *f = fopen(BADGE_PATH, "r+b");
+    if (!f) {
+        heap_caps_free(frame);
+        return -1;
+    }
+    bool ok = fseek(f, 0, SEEK_END) == 0 && fwrite(frame, 1, bytes, f) == bytes;
+    if (ok) {
+        uint32_t count = (uint32_t)(s_badge_frames + 1);
+        ok = fseek(f, 2 * (long)sizeof(uint32_t), SEEK_SET) == 0 &&
+             fwrite(&count, sizeof(count), 1, f) == 1;
+    }
+    fclose(f);
+    heap_caps_free(frame);
+    if (!ok) {
+        return -1;
+    }
+    s_badge_frames++;
+    image_hide_locked();
+    muse_state_set_hint("BADGE FRAME ADDED");
+    return s_badge_frames;
+}
+
+int muse_ui_badge_append(void)
+{
+    if (!s_ready) {
+        return -1;
+    }
+    muse_board->display_lock(-1);
+    int n = badge_append_locked();
+    muse_board->display_unlock();
+    return n;
 }
 
 /* Holding a drawn image keeps it as the badge. Runs with the display lock
@@ -1667,7 +1865,7 @@ bool muse_ui_badge_save(void)
 static void on_image_long_pressed(lv_event_t *e)
 {
     (void)e;
-    badge_save_locked();
+    badge_save_locked(BADGE_DEFAULT_INTERVAL_MS);
 }
 
 static void build_badge_tile(void)
@@ -2845,6 +3043,9 @@ static void frame_tick(lv_timer_t *timer)
     }
     (void)timer;
     image_sync();
+#if CONFIG_MUSE_BADGE
+    badge_tick();
+#endif
     float mode_t;
     muse_mode_t mode = muse_state_mode(&mode_t);
     float now = (float)esp_timer_get_time() / 1e6f;

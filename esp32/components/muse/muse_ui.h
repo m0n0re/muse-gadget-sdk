@@ -70,7 +70,8 @@ void muse_ui_image_hide(void);
  * currently drawn as the badge tile's picture (stored on the device, so it
  * survives restarts), or remove the badge. Save fails when no image is
  * shown. Defined only in MUSE_BADGE builds. */
-bool muse_ui_badge_save(void);
+bool muse_ui_badge_save(int interval_ms);
+int muse_ui_badge_append(void);
 void muse_ui_badge_clear(void);
 /* Watcher camera mode: shows an on-screen shutter hint over the live image. */
 void muse_ui_camera_hint(bool visible);
